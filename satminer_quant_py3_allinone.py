@@ -724,8 +724,8 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
     replace_patterns(Path(str(fasta_monomers) + ".abc"), Path("equivalences.txt"), output_suffix=".fam")
     replace_patterns(Path(str(fasta_monomers) + ".dim.abc"), Path("equivalences.txt"), output_suffix=".fam")
 
-    # Optional: write spreadsheet-friendly copies with prefix in A1
-    # (We use the species prefix from the samples file header.)
+    # Create separate spreadsheet-friendly copies with prefix in A1.
+    # Originals are kept unchanged.
     write_prefixed_copy(Path("selection.txt"), sp_name)
     write_prefixed_copy(Path("pattern.txt"), sp_name)
     write_prefixed_copy(Path("table.txt"), sp_name)
