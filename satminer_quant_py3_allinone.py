@@ -78,6 +78,20 @@ def parse_patterns(pattern_file: Path) -> Dict[str, str]:
     return patterns
 
 
+def fasta_id_to_length(fasta_path: Path) -> Dict[str, int]:
+    """Return a mapping {record_id: sequence_length} for the monomer FASTA."""
+    lengths: Dict[str, int] = {}
+    if not fasta_path.exists():
+        return lengths
+    # Use Biopython if available (it is required by this pipeline).
+    with fasta_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for rec in SeqIO.parse(handle, "fasta"):
+            # SeqIO record.id is up to first whitespace, which matches typical usage.
+            lengths[str(rec.id)] = len(rec.seq)
+    return lengths
+
+
+
 def replace_patterns(input_file: Path, pattern_file: Path, *, output_suffix: str = ".fam") -> Path:
     """Replicates replace_patterns.py behavior: naive .replace for each key across each line."""
     patterns = parse_patterns(pattern_file)
@@ -275,7 +289,7 @@ def sat_subfam2fam(align_file: Path, pattern_file: Path) -> Path:
     return fam_path
 
 
-def divsum_to_rl(samples_file: Path) -> None:
+def divsum_to_rl(samples_file: Path, fasta_monomers: Path) -> None:
     """
     Port of ngs-protocols/divsum_to_rl.py.
 
@@ -352,6 +366,9 @@ def divsum_to_rl(samples_file: Path) -> None:
             if len(info) >= 2:
                 table_dict[info[0]] = info[1]
 
+
+    # fallback monomer lengths directly from the provided monomer FASTA
+    fasta_len = fasta_id_to_length(fasta_monomers)
     # ------------------------------------------------------------
     # Build a GLOBAL satellite list so ALL libraries (and subtractive
     # landscapes) share the same satellite set and ordering.
@@ -448,7 +465,11 @@ def divsum_to_rl(samples_file: Path) -> None:
 
     for n, fam_name in enumerate(all_fams_ordered):
         number_name = str(n + 1).zfill(sat_digits)
-        monomer_len = table_dict.get(fam_name, "NA")
+        monomer_len = table_dict.get(fam_name)
+        if monomer_len is None:
+            # satellite may be absent from reference; try monomer FASTA
+            ml = fasta_len.get(fam_name)
+            monomer_len = str(ml) if ml is not None else "NA"
         defnames.append((fam_name, f"{sp_name}Sat{number_name}-{monomer_len}"))
         eq_names.append((fam_name, f"{sp_name}Sat{number_name}"))
 
@@ -696,7 +717,7 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
         sat_subfam2fam(align, Path("pattern.txt"))
 
     # convert divsum to repeat landscape + plots
-    divsum_to_rl(samples_file)
+    divsum_to_rl(samples_file, fasta_monomers)
 
     # apply equivalences to outputs
     replace_patterns(Path("table.txt"), Path("equivalences.txt"), output_suffix=".fam")
