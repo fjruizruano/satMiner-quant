@@ -142,12 +142,14 @@ def write_final_renamed_fasta(
     """
     Build the final renamed FASTA from the original source FASTA and the intermediate .abc FASTA.
 
-    New approach:
-      1) assign a final satellite base name to EVERY original FASTA ID first
-      2) only keep the alias A/B/C suffix when the source record and the alias leader
-         resolve to the SAME final satellite base
+    Strategy based on all variants in the original FASTA:
+      1) resolve the final satellite BASE for every original FASTA ID
+         (direct mapping in equivalences.txt wins; otherwise fall back to the alias leader)
+      2) group ALL source variants by that final base name
+      3) assign A/B/C... only inside each final base group
 
-    This avoids forcing a secondary-exclusive variant into another family's B/C suffix.
+    This avoids borrowing a B/C suffix from another family when a secondary-exclusive
+    variant has already been promoted to its own final satellite name.
     """
     if not source_fasta.exists():
         print(f"WARNING: source FASTA not found: {source_fasta}")
@@ -165,16 +167,15 @@ def write_final_renamed_fasta(
 
     family_ids_sorted = sorted(eq_map.keys(), key=len, reverse=True)
 
-    # First pass: resolve, for each original source ID, which final satellite BASE it belongs to.
-    # This uses direct equivalence hits first, then falls back to the alias leader mapping.
-    alias_info_by_src: Dict[str, Tuple[str | None, str]] = {}
+    # First pass: resolve a final BASE name for every original source ID.
+    leader_by_src: Dict[str, str | None] = {}
     base_by_src: Dict[str, str] = {}
 
     for src_rec, alias_rec in zip(source_records, alias_records):
         src_id = str(src_rec.id)
         alias_core = split_alias_core(str(alias_rec.id))
-        leader_id, alias_suffix = match_family_from_alias(alias_core, family_ids_sorted)
-        alias_info_by_src[src_id] = (leader_id, alias_suffix)
+        leader_id, _alias_suffix = match_family_from_alias(alias_core, family_ids_sorted)
+        leader_by_src[src_id] = leader_id
 
         if src_id in eq_map:
             base_by_src[src_id] = eq_map[src_id]
@@ -183,8 +184,31 @@ def write_final_renamed_fasta(
         else:
             base_by_src[src_id] = alias_core
 
-    # Second pass: build final renamed IDs. Keep A/B/C only when the alias leader and the
-    # source record resolve to the SAME final base name.
+    # Critical change: assign suffixes from the FULL original FASTA grouped by final base,
+    # not from alias inheritance.
+    members_by_base: Dict[str, List[str]] = {}
+    for src_rec in source_records:
+        src_id = str(src_rec.id)
+        final_base = base_by_src[src_id]
+        members_by_base.setdefault(final_base, []).append(src_id)
+
+    suffix_by_src: Dict[str, str] = {}
+    for final_base, members in members_by_base.items():
+        if len(members) == 1:
+            suffix_by_src[members[0]] = ""
+            continue
+
+        def member_sort_key(src_id: str) -> Tuple[int, str]:
+            # Direct hits in equivalences.txt first, then stable alphabetical order.
+            return (0 if src_id in eq_map else 1, src_id)
+
+        ordered_members = sorted(members, key=member_sort_key)
+        for idx, src_id in enumerate(ordered_members):
+            if idx < 26:
+                suffix_by_src[src_id] = chr(ord('A') + idx)
+            else:
+                suffix_by_src[src_id] = f"_{idx+1}"
+
     equivalence_pairs: List[Tuple[str, str]] = []
     renamed_records: List[Tuple[str, str, str]] = []
 
@@ -192,14 +216,9 @@ def write_final_renamed_fasta(
         src_id = str(src_rec.id)
         seq = str(src_rec.seq)
         variant_len = len(seq)
-        leader_id, alias_suffix = alias_info_by_src.get(src_id, (None, ""))
         final_base = base_by_src[src_id]
-
-        suffix_for_name = ""
-        if alias_suffix and leader_id is not None:
-            leader_base = base_by_src.get(leader_id)
-            if leader_base == final_base:
-                suffix_for_name = alias_suffix
+        suffix_for_name = suffix_by_src.get(src_id, "")
+        leader_id = leader_by_src.get(src_id)
 
         leader_len_id = src_id if src_id in eq_map else leader_id
         if leader_len_id is not None and leader_len_id in leader_len_map:
@@ -225,7 +244,6 @@ def write_final_renamed_fasta(
         with equivalence_out.open("w", encoding="utf-8") as out_eq:
             for old_id, new_id in equivalence_pairs:
                 out_eq.write(f"{old_id}\t{new_id}\n")
-
 
 
 def rename_fasta_and_dim_outputs(fasta_monomers: Path) -> None:
