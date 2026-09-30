@@ -403,20 +403,22 @@ def write_final_renamed_fasta(
         raw_src_id = str(src_rec.id)
         src_id = normalize_source_id(raw_src_id)
         seq = str(src_rec.seq)
-        variant_len = len(seq)
+        actual_seq_len = len(seq)
         final_base = base_by_src[src_id]
         suffix_for_name = suffix_by_src.get(src_id, "")
         leader_id = leader_by_src.get(src_id, src_id)
 
         leader_len_id = src_id if src_id in eq_map else leader_id
-        if leader_len_id in leader_len_map:
-            leader_len = leader_len_map[leader_len_id]
+        if src_id in source_len_map:
+            name_len = str(source_len_map[src_id])
+        elif leader_len_id in leader_len_map:
+            name_len = leader_len_map[leader_len_id]
         elif leader_len_id in source_len_map:
-            leader_len = str(source_len_map[leader_len_id])
+            name_len = str(source_len_map[leader_len_id])
         else:
-            leader_len = str(variant_len)
+            name_len = str(actual_seq_len)
 
-        variant_name = f"{final_base}{suffix_for_name}-{variant_len}"
+        variant_name = f"{final_base}{suffix_for_name}-{name_len}"
         family_name = f"{variant_name}"
         equivalence_pairs.append((src_id, variant_name))
         renamed_records.append((variant_name, family_name, seq))
