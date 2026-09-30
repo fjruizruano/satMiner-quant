@@ -130,6 +130,62 @@ def match_family_from_alias(alias_core: str, family_ids_sorted: List[str]) -> Tu
     return None, ""
 
 
+def parse_original_divsum_counts(samples_file: Path) -> tuple[str, list[str], dict[str, dict[str, object]]]:
+    """Parse the ORIGINAL .divsum files (not .align.fam.divsum) for all libraries."""
+    samples = read_lines(samples_file)
+    samples_rl = samples[0].rstrip("\n").split("\t")
+    ref_library = samples_rl[1]
+
+    lib_dict: Dict[str, List[str]] = {}
+    for lib in samples[1:]:
+        lib = lib.rstrip("\n").split("\t")
+        if not lib or len(lib) < 3:
+            continue
+        lib_dict[lib[0]] = lib[1:]
+
+    parsed: dict[str, dict[str, object]] = {}
+    lib_order = list(lib_dict.keys())
+    for library, vals in lib_dict.items():
+        divsum_path = Path(vals[0])
+        nucs = int(vals[1])
+        data = read_lines(divsum_path)
+        s_matrix_div = data.index("-----\t------\t------\t-----------\t-------\n")
+        s_matrix = data.index("Coverage for each repeat class and divergence (Kimura)\n")
+
+        divergence: Dict[str, str] = {}
+        for line in data[s_matrix_div + 1 : s_matrix - 2]:
+            info = line.split()
+            if len(info) >= 2:
+                divergence[info[1]] = info[-1]
+
+        elements = data[s_matrix + 1].split()
+        matrix_mut = [[element.split("/")[-1], []] for element in elements[1:]]
+        n_el = len(matrix_mut)
+        for line in data[s_matrix + 2 : s_matrix + 45]:
+            info = line.split()[1:]
+            if len(info) < n_el:
+                continue
+            for n in range(n_el):
+                matrix_mut[n][1].append(int(info[n]))
+
+        family_abs = {matrix_mut[n][0]: sum(matrix_mut[n][1]) for n in range(n_el)}
+        family_rel = {k: (v / nucs) for k, v in family_abs.items()}
+        parsed[library] = {
+            "nucs": nucs,
+            "divergence": divergence,
+            "family_abs": family_abs,
+            "family_rel": family_rel,
+        }
+
+    return ref_library, lib_order, parsed
+
+
+def suffix_from_index(idx: int) -> str:
+    if idx < 26:
+        return chr(ord('A') + idx)
+    return f"_{idx+1}"
+
+
 def write_final_renamed_fasta(
     source_fasta: Path,
     alias_fasta: Path,
@@ -137,19 +193,28 @@ def write_final_renamed_fasta(
     eq_map: Dict[str, str],
     leader_len_map: Dict[str, str],
     source_len_map: Dict[str, int],
+    ref_counts: Dict[str, int],
+    secondary_counts: Dict[str, int],
+    ref_rel: Dict[str, float],
+    secondary_rel: Dict[str, float],
     equivalence_out: Path | None = None,
+    abundance_out: Path | None = None,
+    ref_library: str | None = None,
+    secondary_library: str | None = None,
 ) -> None:
     """
-    Build the final renamed FASTA from the original source FASTA and the intermediate .abc FASTA.
+    Build final renamed FASTA using all original FASTA variants plus abundances from the ORIGINAL divsums.
 
-    Strategy based on all variants in the original FASTA:
-      1) resolve the final satellite BASE for every original FASTA ID
-         (direct mapping in equivalences.txt wins; otherwise fall back to the alias leader)
-      2) group ALL source variants by that final base name
-      3) assign A/B/C... only inside each final base group
+    Naming strategy:
+      - direct mapping in equivalences.txt always wins for the final base satellite name
+      - variants that keep the cluster leader base get suffixes A/B/C... ranked by:
+          1) decreasing abundance in the primary/reference divsum
+          2) for variants absent from primary, decreasing abundance in the secondary divsum
+      - variants promoted to their own final base keep that own base with no inherited suffix
 
-    This avoids borrowing a B/C suffix from another family when a secondary-exclusive
-    variant has already been promoted to its own final satellite name.
+    This preserves cases like:
+      F1V2dvR5CL397b_A1 -> DviSat53A-180
+      F1V1dvR5CL397a_A1 -> DviSat55-178
     """
     if not source_fasta.exists():
         print(f"WARNING: source FASTA not found: {source_fasta}")
@@ -167,50 +232,65 @@ def write_final_renamed_fasta(
 
     family_ids_sorted = sorted(eq_map.keys(), key=len, reverse=True)
 
-    # First pass: resolve a final BASE name for every original source ID.
-    leader_by_src: Dict[str, str | None] = {}
+    # Resolve original cluster leader and final base for each source sequence.
+    leader_by_src: Dict[str, str] = {}
     base_by_src: Dict[str, str] = {}
-
     for src_rec, alias_rec in zip(source_records, alias_records):
         src_id = str(src_rec.id)
         alias_core = split_alias_core(str(alias_rec.id))
         leader_id, _alias_suffix = match_family_from_alias(alias_core, family_ids_sorted)
+        if leader_id is None:
+            leader_id = src_id
         leader_by_src[src_id] = leader_id
-
         if src_id in eq_map:
             base_by_src[src_id] = eq_map[src_id]
-        elif leader_id is not None and leader_id in eq_map:
+        elif leader_id in eq_map:
             base_by_src[src_id] = eq_map[leader_id]
         else:
             base_by_src[src_id] = alias_core
 
-    # Critical change: assign suffixes from the FULL original FASTA grouped by final base,
-    # not from alias inheritance.
-    members_by_base: Dict[str, List[str]] = {}
+    # Group all original sequences by their original cluster leader.
+    members_by_leader: Dict[str, List[str]] = {}
     for src_rec in source_records:
         src_id = str(src_rec.id)
-        final_base = base_by_src[src_id]
-        members_by_base.setdefault(final_base, []).append(src_id)
+        members_by_leader.setdefault(leader_by_src[src_id], []).append(src_id)
 
+    # Assign suffixes only to variants that remain under the leader's final base.
     suffix_by_src: Dict[str, str] = {}
-    for final_base, members in members_by_base.items():
+    for leader_id, members in members_by_leader.items():
+        leader_base = eq_map.get(leader_id, base_by_src.get(leader_id, leader_id))
+        keep_under_leader = [m for m in members if base_by_src[m] == leader_base]
         if len(members) == 1:
             suffix_by_src[members[0]] = ""
             continue
 
-        def member_sort_key(src_id: str) -> Tuple[int, str]:
-            # Direct hits in equivalences.txt first, then stable alphabetical order.
-            return (0 if src_id in eq_map else 1, src_id)
-
-        ordered_members = sorted(members, key=member_sort_key)
-        for idx, src_id in enumerate(ordered_members):
-            if idx < 26:
-                suffix_by_src[src_id] = chr(ord('A') + idx)
+        def rank_key(src_id: str) -> tuple[int, float, float, str]:
+            ref_ab = ref_counts.get(src_id, 0)
+            sec_ab = secondary_counts.get(src_id, 0)
+            # Primary-present variants first, then secondary-specific, then absent.
+            if ref_ab > 0:
+                tier = 0
+            elif sec_ab > 0:
+                tier = 1
             else:
-                suffix_by_src[src_id] = f"_{idx+1}"
+                tier = 2
+            return (tier, -ref_ab, -sec_ab, src_id)
+
+        ordered_keep = sorted(keep_under_leader, key=rank_key)
+        if len(ordered_keep) == 1:
+            # Important: keep A for the leader when the original cluster had >1 members.
+            suffix_by_src[ordered_keep[0]] = 'A'
+        else:
+            for idx, src_id in enumerate(ordered_keep):
+                suffix_by_src[src_id] = suffix_from_index(idx)
+
+        for m in members:
+            if m not in suffix_by_src:
+                suffix_by_src[m] = ""
 
     equivalence_pairs: List[Tuple[str, str]] = []
     renamed_records: List[Tuple[str, str, str]] = []
+    abundance_rows: List[Tuple[str, str, float, str, float, str]] = []
 
     for src_rec in source_records:
         src_id = str(src_rec.id)
@@ -218,12 +298,12 @@ def write_final_renamed_fasta(
         variant_len = len(seq)
         final_base = base_by_src[src_id]
         suffix_for_name = suffix_by_src.get(src_id, "")
-        leader_id = leader_by_src.get(src_id)
+        leader_id = leader_by_src.get(src_id, src_id)
 
         leader_len_id = src_id if src_id in eq_map else leader_id
-        if leader_len_id is not None and leader_len_id in leader_len_map:
+        if leader_len_id in leader_len_map:
             leader_len = leader_len_map[leader_len_id]
-        elif leader_len_id is not None and leader_len_id in source_len_map:
+        elif leader_len_id in source_len_map:
             leader_len = str(source_len_map[leader_len_id])
         else:
             leader_len = str(variant_len)
@@ -232,9 +312,18 @@ def write_final_renamed_fasta(
         family_name = f"{final_base}-{leader_len}"
         equivalence_pairs.append((src_id, variant_name))
         renamed_records.append((variant_name, family_name, seq))
+        abundance_rows.append((
+            src_id,
+            variant_name,
+            float(ref_rel.get(src_id, 0.0)),
+            "NA",
+            float(secondary_rel.get(src_id, 0.0)),
+            "NA",
+        ))
 
     renamed_records.sort(key=lambda x: x[0])
     equivalence_pairs.sort(key=lambda x: x[1])
+    abundance_rows.sort(key=lambda x: x[1])
 
     with out_fasta.open("w", encoding="utf-8") as out_handle:
         for variant_name, family_name, seq in renamed_records:
@@ -245,14 +334,21 @@ def write_final_renamed_fasta(
             for old_id, new_id in equivalence_pairs:
                 out_eq.write(f"{old_id}\t{new_id}\n")
 
+    if abundance_out is not None:
+        ref_name = ref_library or "primary"
+        sec_name = secondary_library or "secondary"
+        with abundance_out.open("w", encoding="utf-8") as out_ab:
+            out_ab.write(
+                f"OriginalID\tFinalID\t{ref_name}_abundance\t{ref_name}_divergence\t{sec_name}_abundance\t{sec_name}_divergence\n"
+            )
+            for old_id, final_id, ref_ab, ref_div, sec_ab, sec_div in abundance_rows:
+                out_ab.write(f"{old_id}\t{final_id}\t{ref_ab}\t{ref_div}\t{sec_ab}\t{sec_div}\n")
 
-def rename_fasta_and_dim_outputs(fasta_monomers: Path) -> None:
+
+
+def rename_fasta_and_dim_outputs(fasta_monomers: Path, samples_file: Path) -> None:
     """
-    Create the final renamed FASTA outputs:
-      - <fasta_monomers>.fam
-      - <fasta_monomers>.dim.fam
-
-    using the final equivalence names plus the per-variant letters from the intermediate .abc files.
+    Create the final renamed FASTA outputs and a per-sequence abundance table using the ORIGINAL divsums.
     """
     eq_map = parse_patterns(Path("equivalences.txt"))
     if not eq_map:
@@ -261,6 +357,14 @@ def rename_fasta_and_dim_outputs(fasta_monomers: Path) -> None:
 
     leader_len_map = load_table_lengths(Path("table.txt"))
     source_len_map = fasta_id_to_length(fasta_monomers)
+    ref_library, lib_order, parsed_original = parse_original_divsum_counts(samples_file)
+
+    # Use the first non-reference library as the secondary library for ranking/reporting.
+    secondary_library = next((lib for lib in lib_order if lib != ref_library), None)
+    ref_counts = parsed_original[ref_library]["family_abs"] if ref_library in parsed_original else {}
+    secondary_counts = parsed_original[secondary_library]["family_abs"] if secondary_library and secondary_library in parsed_original else {}
+    ref_rel = parsed_original[ref_library]["family_rel"] if ref_library in parsed_original else {}
+    secondary_rel = parsed_original[secondary_library]["family_rel"] if secondary_library and secondary_library in parsed_original else {}
 
     abc_fasta = fasta_monomers.with_name(fasta_monomers.name + ".abc")
     final_fasta = fasta_monomers.with_name(fasta_monomers.name + ".fam")
@@ -271,7 +375,14 @@ def rename_fasta_and_dim_outputs(fasta_monomers: Path) -> None:
         eq_map,
         leader_len_map,
         source_len_map,
+        ref_counts,
+        secondary_counts,
+        ref_rel,
+        secondary_rel,
         Path("equivalences.txt.fam"),
+        Path("final_variant_abundances.txt"),
+        ref_library,
+        secondary_library,
     )
 
     dim_fasta = fasta_monomers.with_name(fasta_monomers.name + ".dim")
@@ -279,12 +390,23 @@ def rename_fasta_and_dim_outputs(fasta_monomers: Path) -> None:
     final_dim_fasta = fasta_monomers.with_name(fasta_monomers.name + ".dim.fam")
     if dim_fasta.exists():
         write_final_renamed_fasta(
-            dim_fasta, dim_abc_fasta, final_dim_fasta, eq_map, leader_len_map, source_len_map
+            dim_fasta,
+            dim_abc_fasta,
+            final_dim_fasta,
+            eq_map,
+            leader_len_map,
+            source_len_map,
+            ref_counts,
+            secondary_counts,
+            ref_rel,
+            secondary_rel,
+            None,
+            None,
+            ref_library,
+            secondary_library,
         )
     else:
         print(f"WARNING: expected {dim_fasta} to exist for final .dim.fam output, but it was not found.")
-
-
 
 def replace_patterns(input_file: Path, pattern_file: Path, *, output_suffix: str = ".fam") -> Path:
     """Replicates replace_patterns.py behavior: naive .replace for each key across each line."""
@@ -960,7 +1082,7 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
     replace_patterns(Path("table.txt"), Path("equivalences.txt"), output_suffix=".fam")
 
     # build final renamed FASTA outputs with the final family names and per-variant lengths
-    rename_fasta_and_dim_outputs(fasta_monomers)
+    rename_fasta_and_dim_outputs(fasta_monomers, samples_file)
 
 
 
