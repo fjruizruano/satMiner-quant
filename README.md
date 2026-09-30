@@ -51,25 +51,25 @@ calcDivergenceFromAlign.pl
 Make the script executable:
 
 ```bash
-chmod +x satminer_quant_py3_allinone_v29.py
+chmod +x satminer_quant_py3_allinone.py
 ```
 
 Run:
 
 ```bash
-./satminer_quant_py3_allinone_v29.py SAMPLES_FILE MONOMER_FASTA
+./satminer_quant_py3_allinone.py SAMPLES_FILE MONOMER_FASTA
 ```
 
 Example:
 
 ```bash
-./satminer_quant_py3_allinone_v29.py samples_dvit.txt dvit_sat.fasta
+./satminer_quant_py3_allinone.py samples_dvit.txt dvit_sat.fasta
 ```
 
 or:
 
 ```bash
-python3 satminer_quant_py3_allinone_v29.py samples_dvit.txt dvit_sat.fasta
+python3 satminer_quant_py3_allinone.py samples_dvit.txt dvit_sat.fasta
 ```
 
 ## Input files
@@ -388,7 +388,7 @@ The exact files depend on the number of libraries and comparisons specified in t
 # Example workflow
 
 ```bash
-./satminer_quant_py3_allinone_v29.py samples_dvit.txt dvit_sat.fasta
+./satminer_quant_py3_allinone.py samples_dvit.txt dvit_sat.fasta
 ```
 
 Expected high-level progress:
@@ -445,7 +445,7 @@ The early `original_variant_abundances.txt` table is used to retain this informa
 For reproducible analyses, keep together:
 
 ```text
-satminer_quant_py3_allinone_v29.py
+satminer_quant_py3_allinone.py
 samples_*.txt
 *_sat.fasta
 calcDivergenceFromAlign.pl
