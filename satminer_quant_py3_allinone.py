@@ -984,6 +984,84 @@ dev.off()
 
 
 
+
+def write_original_variant_abundances(samples_file: Path, fasta_monomers: Path, out_path: Path = Path("original_variant_abundances.txt")) -> None:
+    """Write one row per original FASTA sequence with abundance/divergence in primary and secondary divsum files."""
+    ref_library, lib_order, parsed = parse_original_divsum_counts(samples_file)
+    secondary_library = next((lib for lib in lib_order if lib != ref_library), None)
+    ref_data = parsed.get(ref_library, {})
+    sec_data = parsed.get(secondary_library, {}) if secondary_library else {}
+
+    ref_rel = ref_data.get("family_rel", {}) if isinstance(ref_data, dict) else {}
+    ref_div = ref_data.get("divergence", {}) if isinstance(ref_data, dict) else {}
+    sec_rel = sec_data.get("family_rel", {}) if isinstance(sec_data, dict) else {}
+    sec_div = sec_data.get("divergence", {}) if isinstance(sec_data, dict) else {}
+
+    rows = []
+    for rec in SeqIO.parse(str(fasta_monomers), "fasta"):
+        rid = str(rec.id)
+        length = len(str(rec.seq))
+        rows.append((
+            rid,
+            length,
+            float(ref_rel.get(rid, 0.0)),
+            str(ref_div.get(rid, "NA")),
+            float(sec_rel.get(rid, 0.0)) if secondary_library else 0.0,
+            str(sec_div.get(rid, "NA")) if secondary_library else "NA",
+        ))
+
+    with out_path.open("w", encoding="utf-8") as out:
+        sec_name = secondary_library or "secondary"
+        out.write(f"OriginalID	Length	{ref_library}_abundance	{ref_library}_divergence	{sec_name}_abundance	{sec_name}_divergence\n")
+        for rid, length, ra, rd, sa, sd in rows:
+            out.write(f"{rid}	{length}	{ra}	{rd}	{sa}	{sd}\n")
+
+
+def write_grouped_satellite_abundances(samples_file: Path, out_path: Path = Path("grouped_satellite_abundances.txt")) -> None:
+    """Write one row per grouped satellite after the .align.fam.divsum step, using final names from .abdiv outputs."""
+    samples = read_lines(samples_file)
+    header = samples[0].rstrip("\n").split("	")
+    ref_library = header[1]
+    libs = []
+    for lib in samples[1:]:
+        parts = lib.rstrip("\n").split("	")
+        if len(parts) >= 2:
+            libs.append(parts[0])
+    secondary_library = next((lib for lib in libs if lib != ref_library), None)
+    if secondary_library is None:
+        print("WARNING: grouped_satellite_abundances.txt not written because no secondary library was found.")
+        return
+
+    def read_abdiv(path: Path):
+        rows = []
+        if not path.exists():
+            return rows
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split("	")
+                if len(parts) >= 3:
+                    rows.append((parts[0], parts[1], parts[2]))
+        return rows
+
+    rows_a = read_abdiv(Path(f"{ref_library}.abdiv"))
+    rows_b = read_abdiv(Path(f"{secondary_library}.abdiv"))
+    dict_a = {name: (ab, div) for name, ab, div in rows_a}
+    dict_b = {name: (ab, div) for name, ab, div in rows_b}
+    ordered = [name for name, _, _ in rows_a]
+    for name, _, _ in rows_b:
+        if name not in dict_a:
+            ordered.append(name)
+
+    with out_path.open("w", encoding="utf-8") as out:
+        out.write(f"FinalSatellite	{ref_library}_abundance	{ref_library}_divergence	{secondary_library}_abundance	{secondary_library}_divergence\n")
+        for name in ordered:
+            a_ab, a_div = dict_a.get(name, ("0", "NA"))
+            b_ab, b_div = dict_b.get(name, ("0", "NA"))
+            out.write(f"{name}	{a_ab}	{a_div}	{b_ab}	{b_div}\n")
+
 def merge_abdiv_pair(lib_a: str, lib_b: str) -> None:
     """Merge two .abdiv files side by side into <lib_a>-<lib_b>.abdiv.txt."""
     def read_abdiv(path: Path):
@@ -1070,6 +1148,9 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
     print(f"{ref_library} is the reference library.\n")
     print("Defining families.\n")
 
+    # 1) Early table: one row per original FASTA sequence with abundance/divergence in both original divsums
+    write_original_variant_abundances(samples_file, fasta_monomers)
+
     # original satminer_quant: divsum_ab.py ref_divsum fasta
     divsum_ab(ref_divsum, fasta_monomers)
 
@@ -1086,6 +1167,9 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
 
     # convert divsum to repeat landscape + plots
     divsum_to_rl(samples_file, fasta_monomers)
+
+    # 2) Grouped table after the .align.fam.divsum step (multiple variants counted together)
+    write_grouped_satellite_abundances(samples_file)
 
     # apply equivalences to tabular outputs
     replace_patterns(Path("table.txt"), Path("equivalences.txt"), output_suffix=".fam")
