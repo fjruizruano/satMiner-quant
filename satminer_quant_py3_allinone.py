@@ -459,7 +459,7 @@ def divsum_to_rl(samples_file: Path) -> None:
 
     family_rel_def = []
     for fam_name, defname in defnames:
-        number = family_abs[fam_name]
+        number = family_abs.get(fam_name, 0)
         rel_number = round(number / nucs, 100)
         family_rel_def.append((defname, rel_number, divergence.get(fam_name, "NA")))
 
