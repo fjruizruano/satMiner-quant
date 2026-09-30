@@ -137,6 +137,7 @@ def write_final_renamed_fasta(
     eq_map: Dict[str, str],
     leader_len_map: Dict[str, str],
     source_len_map: Dict[str, int],
+    equivalence_out: Path | None = None,
 ) -> None:
     """
     Build the final renamed FASTA from the original source FASTA and the intermediate .abc FASTA.
@@ -153,6 +154,8 @@ def write_final_renamed_fasta(
         return
 
     family_ids_sorted = sorted(eq_map.keys(), key=len, reverse=True)
+
+    equivalence_pairs: List[Tuple[str, str]] = []
 
     with source_fasta.open("r", encoding="utf-8", errors="replace") as src_handle,          alias_fasta.open("r", encoding="utf-8", errors="replace") as alias_handle,          out_fasta.open("w", encoding="utf-8") as out_handle:
 
@@ -218,7 +221,13 @@ def rename_fasta_and_dim_outputs(fasta_monomers: Path) -> None:
     abc_fasta = fasta_monomers.with_name(fasta_monomers.name + ".abc")
     final_fasta = fasta_monomers.with_name(fasta_monomers.name + ".fam")
     write_final_renamed_fasta(
-        fasta_monomers, abc_fasta, final_fasta, eq_map, leader_len_map, source_len_map
+        fasta_monomers,
+        abc_fasta,
+        final_fasta,
+        eq_map,
+        leader_len_map,
+        source_len_map,
+        Path("equivalences.txt.fam"),
     )
 
     dim_fasta = fasta_monomers.with_name(fasta_monomers.name + ".dim")
