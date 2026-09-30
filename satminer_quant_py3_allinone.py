@@ -470,9 +470,17 @@ def divsum_to_rl(samples_file: Path) -> None:
 
     # matrix to dict + rel
     matrix_abs_dict = parsed_libs[ref_library]["matrix_abs_dict"]  # type: ignore[assignment]
+    # Determine number of divergence bins (n_div) from the reference matrix.
+    # This must be defined *before* we fill missing families with zeros.
+    if matrix_abs_dict:
+        n_div = len(next(iter(matrix_abs_dict.values())))
+    else:
+        # Extremely defensive fallback: empty reference matrix (should not happen).
+        n_div = 0
+
     matrix_rel_list = []
     for fam_name, defname in defnames:
-        lista = matrix_abs_dict.get(fam_name, [0] * n_div)  # type: ignore[attr-defined]
+        lista = matrix_abs_dict.get(fam_name, [0] * n_div)
         lista_rel = [x / nucs for x in lista]
         matrix_rel_list.append((defname, lista_rel))
 
@@ -480,7 +488,6 @@ def divsum_to_rl(samples_file: Path) -> None:
 
     # write rel matrix
     header = ["Div"] + [name for name, _ in matrix_rel_list]
-    n_div = len(matrix_rel_list[0][1])
     with Path(f"{ref_library}_rl.txt").open("w", encoding="utf-8") as out:
         out.write("\t".join(header) + "\n")
         for a in range(n_div):
@@ -649,9 +656,13 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
 
     samples = read_lines(samples_file)
     samples_rl = samples[0].rstrip("\n").split("\t")
-    if len(samples_rl) < 2:
-        raise ValueError("SamplesFile first line must include at least: sp_name<TAB>ref_library<TAB>rep_land")
+    if len(samples_rl) < 3:
+        raise ValueError(
+            "SamplesFile first line must include: sp_name<TAB>ref_library<TAB>rep_land"
+        )
 
+    # Header fields
+    sp_name = samples_rl[0]
     ref_library = samples_rl[1]
 
     lib_dict: Dict[str, List[str]] = {}
@@ -693,6 +704,7 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
     replace_patterns(Path(str(fasta_monomers) + ".dim.abc"), Path("equivalences.txt"), output_suffix=".fam")
 
     # Optional: write spreadsheet-friendly copies with prefix in A1
+    # (We use the species prefix from the samples file header.)
     write_prefixed_copy(Path("selection.txt"), sp_name)
     write_prefixed_copy(Path("pattern.txt"), sp_name)
     write_prefixed_copy(Path("table.txt"), sp_name)
