@@ -1219,17 +1219,25 @@ def write_grouped_satellite_abundances(samples_file: Path, out_path: Path = Path
         final_id = f"{final_base}-{final_len}" if final_len else final_base
         return original_id, final_id
 
+    rel_rows = []
+    abs_rows = []
+    for name in ordered:
+        original_id, final_id = resolve_ids(name)
+        rel_rows.append((original_id, final_id, ref_rel.get(name, 0), ref_div.get(name, 'NA'), sec_rel.get(name, 0), sec_div.get(name, 'NA')))
+        abs_rows.append((original_id, final_id, ref_abs.get(name, 0), ref_div.get(name, 'NA'), sec_abs.get(name, 0), sec_div.get(name, 'NA')))
+
+    rel_rows.sort(key=lambda row: (str(row[1]), str(row[0])))
+    abs_rows.sort(key=lambda row: (str(row[1]), str(row[0])))
+
     with out_path.open("w", encoding="utf-8") as out:
         out.write(f"OriginalID\tFinalID\t{ref_library}_abundance\t{ref_library}_divergence\t{secondary_library}_abundance\t{secondary_library}_divergence\n")
-        for name in ordered:
-            original_id, final_id = resolve_ids(name)
-            out.write(f"{original_id}\t{final_id}\t{ref_rel.get(name, 0)}\t{ref_div.get(name, 'NA')}\t{sec_rel.get(name, 0)}\t{sec_div.get(name, 'NA')}\n")
+        for row in rel_rows:
+            out.write("\t".join(map(str, row)) + "\n")
 
     with out_abs_path.open("w", encoding="utf-8") as out_abs:
         out_abs.write(f"OriginalID\tFinalID\t{ref_library}_abundance\t{ref_library}_divergence\t{secondary_library}_abundance\t{secondary_library}_divergence\n")
-        for name in ordered:
-            original_id, final_id = resolve_ids(name)
-            out_abs.write(f"{original_id}\t{final_id}\t{ref_abs.get(name, 0)}\t{ref_div.get(name, 'NA')}\t{sec_abs.get(name, 0)}\t{sec_div.get(name, 'NA')}\n")
+        for row in abs_rows:
+            out_abs.write("\t".join(map(str, row)) + "\n")
 
 def merge_abdiv_pair(lib_a: str, lib_b: str) -> None:
     """Merge two .abdiv files side by side into <lib_a>-<lib_b>.abdiv.txt."""
