@@ -155,8 +155,6 @@ def write_final_renamed_fasta(
 
     family_ids_sorted = sorted(eq_map.keys(), key=len, reverse=True)
 
-    equivalence_pairs: List[Tuple[str, str]] = []
-
     with source_fasta.open("r", encoding="utf-8", errors="replace") as src_handle,          alias_fasta.open("r", encoding="utf-8", errors="replace") as alias_handle,          out_fasta.open("w", encoding="utf-8") as out_handle:
 
         src_iter = SeqIO.parse(src_handle, "fasta")
@@ -199,7 +197,13 @@ def write_final_renamed_fasta(
 
             variant_name = f"{final_base}{variant_suffix}-{variant_len}"
             family_name = f"{final_base}-{leader_len}"
+            equivalence_pairs.append((str(src_rec.id), variant_name))
             out_handle.write(f">{variant_name}#Satellite/{family_name}\n{seq}\n")
+
+    if equivalence_out is not None:
+        with equivalence_out.open("w", encoding="utf-8") as out_eq:
+            for old_id, new_id in equivalence_pairs:
+                out_eq.write(f"{old_id}\t{new_id}\n")
 
 
 def rename_fasta_and_dim_outputs(fasta_monomers: Path) -> None:
