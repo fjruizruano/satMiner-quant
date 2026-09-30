@@ -720,19 +720,19 @@ colourCount = {len(defnames)}
 ref <- colorRampPalette(brewer.pal(12, "Paired"))(colourCount)
 palette1 <- rev(ref)
 pdf("{library}_rl.pdf", width=11, height=7, onefile=TRUE)
-ggplot(data=lm, aes(x=lm$Div, y=lm$value, fill=lm$variable))+
+ggplot(data=lm, aes(x=Div, y=value, fill=variable))+
   geom_bar(stat="identity", position = position_stack(reverse = TRUE)) +
   scale_fill_manual(name="satDNA Families", values = palette1)+
   labs(x="Kimura Substitution Level (%)", y="Genome Proportion") +
   guides(fill=guide_legend(ncol=3, byrow=TRUE)) +
+  coord_cartesian(ylim=c(0,{big_row})) +
+  theme_bw() +
   theme(
     legend.position="right",
     legend.title=element_text(size=10),
     legend.text=element_text(size=7),
     legend.key.size=unit(0.35, "cm")
-  ) +
-  ylim(0,{big_row}) +
-  theme_bw()
+  )
 dev.off()
 """
         write_text(r_path, script)
@@ -778,22 +778,19 @@ colourCount = {len(defnames)}
 ref <- colorRampPalette(brewer.pal(12, "Paired"))(colourCount)
 palette1 <- rev(ref)
 pdf("{rl}_rl.pdf", width=11, height=7, onefile=TRUE)
-ggplot()+
-  geom_bar(data=s2,aes(x=s2$Div, y=s2$value, fill=s2$variable),stat="identity",position=position_stack(reverse = TRUE))+
-  scale_fill_manual(name="satDNA Families", values=palette1)+
-  labs(x="Kimura Substitution Level (%)", y="Genome Proportion")+
-  theme_bw() +
+ggplot() +
+  geom_bar(data=s2, aes(x=Div, y=value, fill=variable), stat="identity", position=position_stack(reverse = TRUE)) +
+  geom_bar(data=s1, aes(x=Div, y=value, fill=variable), stat="identity", position=position_stack(reverse = TRUE)) +
+  scale_fill_manual(name="satDNA Families", values=palette1) +
+  labs(x="Kimura Substitution Level (%)", y="Genome Proportion") +
   guides(fill=guide_legend(ncol=3, byrow=TRUE)) +
+  theme_bw() +
   theme(
     legend.position="right",
     legend.title=element_text(size=10),
     legend.text=element_text(size=7),
     legend.key.size=unit(0.35, "cm")
-  ) +
-  geom_bar(data=s1,aes(x=s1$Div, y=s1$value, fill=s1$variable),stat="identity",position=position_stack(reverse = TRUE))+
-  scale_fill_manual(name="satDNA Families", values=palette1)+
-  labs(x="Kimura Substitution Level (%)",y="Genome Proportion")+
-  theme_bw()
+  )
 dev.off()
 """
             write_text(r_path, script)
