@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import operator
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -129,6 +130,114 @@ def match_family_from_alias(alias_core: str, family_ids_sorted: List[str]) -> Tu
                 return fam_id, suffix
     return None, ""
 
+
+
+
+def cluster_key_from_id(seq_id: str) -> str | None:
+    """Return a cluster key for multi-variant monomer ids like F1V2..._A1.
+
+    Examples:
+      F1V2dvR5CL397b_A1 -> F1_A1
+      F14V4dvFR2CL249_B1 -> F14_B1
+    Returns None for ids that do not match this multi-variant pattern.
+    """
+    m = re.match(r'^(F\d+)V\d+.*_([A-Z]\d+)$', seq_id)
+    if not m:
+        return None
+    return f"{m.group(1)}_{m.group(2)}"
+
+
+def rebuild_pattern_from_original_abundances(abund_path: Path, fasta_monomers: Path) -> None:
+    """Rebuild pattern.txt/selection.txt/table.txt using all original FASTA variants.
+
+    Strategy:
+      - group multi-variant ids using the original FASTA id pattern (e.g. F1V1..._A1, F1V2..._A1)
+      - rank members by decreasing abundance in the primary library; if all are 0, use the secondary
+      - write pattern.txt with every non-leader member -> leader, even if the member is absent from the primary
+    This ensures secondary-only variants are still included later when editing *.align files.
+    """
+    if not abund_path.exists():
+        print(f"WARNING: {abund_path} not found; keeping the existing pattern.txt")
+        return
+
+    rows = []
+    with abund_path.open("r", encoding="utf-8", errors="replace") as fh:
+        _header = fh.readline().rstrip("\n").split("\t")
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 6:
+                continue
+            rid = parts[0]
+            try:
+                length = int(parts[1])
+            except Exception:
+                length = 0
+            try:
+                primary_ab = float(parts[2])
+            except Exception:
+                primary_ab = 0.0
+            try:
+                secondary_ab = float(parts[4])
+            except Exception:
+                secondary_ab = 0.0
+            rows.append((rid, length, primary_ab, secondary_ab))
+
+    fasta_records = list(SeqIO.parse(str(fasta_monomers), "fasta"))
+    fasta_by_id = {str(rec.id): rec for rec in fasta_records}
+    ids_in_fasta = [str(rec.id) for rec in fasta_records]
+
+    row_by_id = {rid: (length, pab, sab) for rid, length, pab, sab in rows}
+    groups: Dict[str, List[str]] = {}
+    for rid in ids_in_fasta:
+        key = cluster_key_from_id(rid) or rid
+        groups.setdefault(key, []).append(rid)
+
+    def rank_key(rid: str) -> tuple[int, float, float, str]:
+        _length, pab, sab = row_by_id.get(rid, (len(str(fasta_by_id[rid].seq)), 0.0, 0.0))
+        if pab > 0:
+            tier = 0
+        elif sab > 0:
+            tier = 1
+        else:
+            tier = 2
+        return (tier, -pab, -sab, rid)
+
+    pattern_lines: List[str] = []
+    selection_ids: List[str] = []
+    var_number: Dict[str, int] = {}
+
+    for _key, members in groups.items():
+        if len(members) == 1 and cluster_key_from_id(members[0]) is None:
+            rid = members[0]
+            selection_ids.append(rid)
+            var_number[rid] = 1
+            continue
+
+        ordered = sorted(members, key=rank_key)
+        leader = ordered[0]
+        selection_ids.append(leader)
+        var_number[leader] = len(members)
+        for member in ordered[1:]:
+            pattern_lines.append(f"{member}	{leader}")
+
+    Path("pattern.txt").write_text("\n".join(pattern_lines) + ("\n" if pattern_lines else ""), encoding="utf-8")
+    Path("selection.txt").write_text("\n".join(selection_ids) + ("\n" if selection_ids else ""), encoding="utf-8")
+
+    selection_extract_path = Path("selection.txt.extract")
+    with selection_extract_path.open("w", encoding="utf-8") as out:
+        for rid in selection_ids:
+            rec = fasta_by_id.get(rid)
+            if rec is not None:
+                SeqIO.write(rec, out, "fasta")
+
+    with Path("table.txt").open("w", encoding="utf-8") as out:
+        for rid in selection_ids:
+            rec = fasta_by_id[rid]
+            seq = str(rec.seq)
+            length = len(seq)
+            at = seq.count("A") + seq.count("T") + seq.count("a") + seq.count("t")
+            at_perc = float(at / length) if length else 0.0
+            out.write(f"{rid}\t{length}\t{at_perc}\t{var_number.get(rid, 1)}\n")
 
 def parse_original_divsum_counts(samples_file: Path) -> tuple[str, list[str], dict[str, dict[str, object]]]:
     """Parse the ORIGINAL .divsum files (not .align.fam.divsum) for all libraries."""
@@ -1153,6 +1262,10 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
 
     # original satminer_quant: divsum_ab.py ref_divsum fasta
     divsum_ab(ref_divsum, fasta_monomers)
+
+    # Rebuild pattern.txt from the early per-sequence abundance table so secondary-only
+    # variants are still represented in pattern.txt and therefore in *.align.fam.
+    rebuild_pattern_from_original_abundances(Path("original_variant_abundances.txt"), fasta_monomers)
 
     print("Generating divsum file per families")
 
