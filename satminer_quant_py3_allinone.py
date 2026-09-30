@@ -52,14 +52,51 @@ except ImportError as e:
 # helpers
 # -------------------------
 
-def run(cmd: List[str] | str, *, shell: bool = False) -> None:
-    """Run a command (prints it first) and raise if it fails."""
+def run(
+    cmd: List[str] | str,
+    *,
+    shell: bool = False,
+    announce: str | None = None,
+    quiet: bool = False,
+) -> None:
+    """Run a command and raise if it fails.
+
+    Parameters
+    ----------
+    announce:
+        Friendly message to show before running the command.
+    quiet:
+        If True, suppress stdout/stderr on success and only show them on failure.
+    """
     if isinstance(cmd, list):
         printable = " ".join(cmd)
     else:
         printable = cmd
-    print(printable)
-    subprocess.run(cmd, shell=shell, check=True)
+
+    if announce:
+        print(announce)
+    else:
+        print(printable)
+
+    if quiet:
+        result = subprocess.run(
+            cmd,
+            shell=shell,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            print(f"ERROR while running: {printable}")
+            if result.stdout:
+                print(result.stdout.rstrip())
+            if result.stderr:
+                print(result.stderr.rstrip(), file=sys.stderr)
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
+    else:
+        subprocess.run(cmd, shell=shell, check=True)
 
 
 def read_lines(path: Path) -> List[str]:
@@ -694,7 +731,12 @@ def sat_subfam2fam(align_file: Path, pattern_file: Path) -> Path:
     """
     fam_path = replace_patterns(align_file, pattern_file, output_suffix=".fam")
     # keep same external call as original
-    run(f"calcDivergenceFromAlign.pl -s {align_file}.fam.divsum {fam_path}", shell=True)
+    run(
+        f"calcDivergenceFromAlign.pl -s {align_file}.fam.divsum {fam_path}",
+        shell=True,
+        announce=f"  - Calculating divergence for {fam_path.name} ...",
+        quiet=True,
+    )
     return fam_path
 
 
@@ -992,7 +1034,7 @@ dev.off()
 """
         write_text(r_path, script)
         try:
-            run(["Rscript", str(r_path)])
+            run(["Rscript", str(r_path)], announce=f"  - Rendering plot: {r_path.stem}.pdf", quiet=True)
         except Exception as e:
             print(f"WARNING: Could not run Rscript for {library}: {e}")
 
@@ -1061,7 +1103,7 @@ dev.off()
 """
             write_text(r_path, script)
             try:
-                run(["Rscript", str(r_path)])
+                run(["Rscript", str(r_path)], announce=f"  - Rendering plot: {r_path.stem}.pdf", quiet=True)
             except Exception as e:
                 print(f"WARNING: Could not run Rscript for {rl}: {e}")
 
@@ -1246,7 +1288,9 @@ def write_prefixed_copy(path: Path, prefix: str) -> None:
 # -------------------------
 
 def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
-    print("Loading files.\n")
+    print("Starting satMiner quantification...")
+    print(f"  - Loading samples file: {samples_file}")
+    print(f"  - Loading monomer FASTA: {fasta_monomers}\n")
 
     samples = read_lines(samples_file)
     samples_rl = samples[0].rstrip("\n").split("\t")
@@ -1272,8 +1316,8 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
 
     ref_divsum = Path(lib_dict[ref_library][0])
 
-    print(f"{ref_library} is the reference library.\n")
-    print("Defining families.\n")
+    print(f"Reference library: {ref_library}\n")
+    print("Step 1/4 - Defining families...\n")
 
     # 1) Early table: one row per original FASTA sequence with abundance/divergence in both original divsums
     write_original_variant_abundances(samples_file, fasta_monomers)
@@ -1285,7 +1329,7 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
     # variants are still represented in pattern.txt and therefore in *.align.fam.
     rebuild_pattern_from_original_abundances(Path("original_variant_abundances.txt"), fasta_monomers)
 
-    print("Generating divsum file per families")
+    print("Step 2/4 - Generating family-level divsum files...")
 
     # for each library, take its .divsum path -> .align, then sat_subfam2fam
     for line in samples[1:]:
@@ -1297,6 +1341,7 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
         sat_subfam2fam(align, Path("pattern.txt"))
 
     # convert divsum to repeat landscape + plots
+    print("\nStep 3/4 - Building repeat landscapes and summary tables...")
     divsum_to_rl(samples_file, fasta_monomers)
 
     # 2) Grouped table after the .align.fam.divsum step (multiple variants counted together)
@@ -1306,7 +1351,9 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
     replace_patterns(Path("table.txt"), Path("equivalences.txt"), output_suffix=".fam")
 
     # build final renamed FASTA outputs with the final family names and per-variant lengths
+    print("\nStep 4/4 - Renaming final FASTA outputs...")
     rename_fasta_and_dim_outputs(fasta_monomers, samples_file)
+    print("\nDone.")
 
 
 
