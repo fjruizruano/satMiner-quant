@@ -1125,29 +1125,61 @@ def write_grouped_satellite_abundances(samples_file: Path, out_path: Path = Path
     sec_abs = sec_data["family_abs"]  # type: ignore[index]
     sec_div = sec_data["divergence"]  # type: ignore[index]
 
+    eq_map: Dict[str, str] = {}
     eq_reverse: Dict[str, str] = {}
     eq_path = Path("equivalences.txt")
     if eq_path.exists():
         for line in read_lines(eq_path):
             parts = line.rstrip("\n").split("\t")
             if len(parts) >= 2:
-                eq_reverse[parts[1]] = parts[0]
+                old_name, new_base = parts[0], parts[1]
+                eq_map[old_name] = new_base
+                eq_reverse[new_base] = old_name
+
+    table_orig: Dict[str, str] = {}
+    table_path = Path("table.txt")
+    if table_path.exists():
+        for line in read_lines(table_path):
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2:
+                table_orig[parts[0]] = parts[1]
+
+    table_fam: Dict[str, str] = {}
+    table_fam_path = Path("table.txt.fam")
+    if table_fam_path.exists():
+        for line in read_lines(table_fam_path):
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2:
+                table_fam[parts[0]] = parts[1]
 
     ordered = sorted(set(list(ref_rel.keys()) + list(sec_rel.keys())))
 
-    def original_id_for(final_name: str) -> str:
-        base = final_name.split('-')[0]
-        return eq_reverse.get(base, "NA")
+    def resolve_ids(name: str) -> Tuple[str, str]:
+        # Case 1: grouped divsum still uses the original family/leader name
+        if name in eq_map:
+            original_id = name
+            final_base = eq_map[name]
+        else:
+            # Case 2: grouped divsum already uses the final base or final ID with length
+            candidate = name.split("#")[0]
+            base = candidate.split("-")[0]
+            final_base = base
+            original_id = eq_reverse.get(base, "NA")
+        final_len = table_fam.get(final_base) or table_orig.get(original_id)
+        final_id = f"{final_base}-{final_len}" if final_len else final_base
+        return original_id, final_id
 
     with out_path.open("w", encoding="utf-8") as out:
-        out.write(f"OriginalID\tFinalSatellite\t{ref_library}_abundance\t{ref_library}_divergence\t{secondary_library}_abundance\t{secondary_library}_divergence\n")
+        out.write(f"OriginalID\tFinalID\t{ref_library}_abundance\t{ref_library}_divergence\t{secondary_library}_abundance\t{secondary_library}_divergence\n")
         for name in ordered:
-            out.write(f"{original_id_for(name)}\t{name}\t{ref_rel.get(name, 0)}\t{ref_div.get(name, 'NA')}\t{sec_rel.get(name, 0)}\t{sec_div.get(name, 'NA')}\n")
+            original_id, final_id = resolve_ids(name)
+            out.write(f"{original_id}\t{final_id}\t{ref_rel.get(name, 0)}\t{ref_div.get(name, 'NA')}\t{sec_rel.get(name, 0)}\t{sec_div.get(name, 'NA')}\n")
 
     with out_abs_path.open("w", encoding="utf-8") as out_abs:
-        out_abs.write(f"OriginalID\tFinalSatellite\t{ref_library}_abundance\t{ref_library}_divergence\t{secondary_library}_abundance\t{secondary_library}_divergence\n")
+        out_abs.write(f"OriginalID\tFinalID\t{ref_library}_abundance\t{ref_library}_divergence\t{secondary_library}_abundance\t{secondary_library}_divergence\n")
         for name in ordered:
-            out_abs.write(f"{original_id_for(name)}\t{name}\t{ref_abs.get(name, 0)}\t{ref_div.get(name, 'NA')}\t{sec_abs.get(name, 0)}\t{sec_div.get(name, 'NA')}\n")
+            original_id, final_id = resolve_ids(name)
+            out_abs.write(f"{original_id}\t{final_id}\t{ref_abs.get(name, 0)}\t{ref_div.get(name, 'NA')}\t{sec_abs.get(name, 0)}\t{sec_div.get(name, 'NA')}\n")
 
 def merge_abdiv_pair(lib_a: str, lib_b: str) -> None:
     """Merge two .abdiv files side by side into <lib_a>-<lib_b>.abdiv.txt."""
