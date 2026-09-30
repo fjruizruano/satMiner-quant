@@ -344,7 +344,12 @@ def write_final_renamed_fasta(
         return
 
     source_records = list(SeqIO.parse(str(source_fasta), "fasta"))
-    source_ids = [str(rec.id) for rec in source_records]
+
+    def normalize_source_id(raw_id: str) -> str:
+        """Strip any previous SAT annotation from FASTA ids, especially in .dim inputs."""
+        return raw_id.split("#Satellite/")[0]
+
+    source_ids = [normalize_source_id(str(rec.id)) for rec in source_records]
 
     base_by_src: Dict[str, str] = {}
     for src_id in source_ids:
@@ -395,7 +400,8 @@ def write_final_renamed_fasta(
     abundance_abs_rows: List[Tuple[str, str, int, str, int, str]] = []
 
     for src_rec in source_records:
-        src_id = str(src_rec.id)
+        raw_src_id = str(src_rec.id)
+        src_id = normalize_source_id(raw_src_id)
         seq = str(src_rec.seq)
         variant_len = len(seq)
         final_base = base_by_src[src_id]
@@ -411,7 +417,7 @@ def write_final_renamed_fasta(
             leader_len = str(variant_len)
 
         variant_name = f"{final_base}{suffix_for_name}-{variant_len}"
-        family_name = f"{final_base}-{leader_len}"
+        family_name = f"{variant_name}"
         equivalence_pairs.append((src_id, variant_name))
         renamed_records.append((variant_name, family_name, seq))
         abundance_rows.append((src_id, variant_name, float(ref_rel.get(src_id, 0.0)), str(ref_divergence.get(src_id, 'NA')), float(secondary_rel.get(src_id, 0.0)), str(secondary_divergence.get(src_id, 'NA'))))
