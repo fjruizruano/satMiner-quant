@@ -142,9 +142,12 @@ def write_final_renamed_fasta(
     """
     Build the final renamed FASTA from the original source FASTA and the intermediate .abc FASTA.
 
-    Output header format:
-      >DviSat01A-100#Satellite/DviSat01-100
-      >DviSat01B-105#Satellite/DviSat01-100
+    New approach:
+      1) assign a final satellite base name to EVERY original FASTA ID first
+      2) only keep the alias A/B/C suffix when the source record and the alias leader
+         resolve to the SAME final satellite base
+
+    This avoids forcing a secondary-exclusive variant into another family's B/C suffix.
     """
     if not source_fasta.exists():
         print(f"WARNING: source FASTA not found: {source_fasta}")
@@ -153,70 +156,63 @@ def write_final_renamed_fasta(
         print(f"WARNING: intermediate alias FASTA not found: {alias_fasta}")
         return
 
+    source_records = list(SeqIO.parse(str(source_fasta), "fasta"))
+    alias_records = list(SeqIO.parse(str(alias_fasta), "fasta"))
+    if len(source_records) != len(alias_records):
+        raise ValueError(
+            f"{alias_fasta} and {source_fasta} have different record counts; cannot align renaming."
+        )
+
     family_ids_sorted = sorted(eq_map.keys(), key=len, reverse=True)
+
+    # First pass: resolve, for each original source ID, which final satellite BASE it belongs to.
+    # This uses direct equivalence hits first, then falls back to the alias leader mapping.
+    alias_info_by_src: Dict[str, Tuple[str | None, str]] = {}
+    base_by_src: Dict[str, str] = {}
+
+    for src_rec, alias_rec in zip(source_records, alias_records):
+        src_id = str(src_rec.id)
+        alias_core = split_alias_core(str(alias_rec.id))
+        leader_id, alias_suffix = match_family_from_alias(alias_core, family_ids_sorted)
+        alias_info_by_src[src_id] = (leader_id, alias_suffix)
+
+        if src_id in eq_map:
+            base_by_src[src_id] = eq_map[src_id]
+        elif leader_id is not None and leader_id in eq_map:
+            base_by_src[src_id] = eq_map[leader_id]
+        else:
+            base_by_src[src_id] = alias_core
+
+    # Second pass: build final renamed IDs. Keep A/B/C only when the alias leader and the
+    # source record resolve to the SAME final base name.
     equivalence_pairs: List[Tuple[str, str]] = []
     renamed_records: List[Tuple[str, str, str]] = []
 
-    with source_fasta.open("r", encoding="utf-8", errors="replace") as src_handle,          alias_fasta.open("r", encoding="utf-8", errors="replace") as alias_handle:
+    for src_rec in source_records:
+        src_id = str(src_rec.id)
+        seq = str(src_rec.seq)
+        variant_len = len(seq)
+        leader_id, alias_suffix = alias_info_by_src.get(src_id, (None, ""))
+        final_base = base_by_src[src_id]
 
-        src_iter = SeqIO.parse(src_handle, "fasta")
-        alias_iter = SeqIO.parse(alias_handle, "fasta")
+        suffix_for_name = ""
+        if alias_suffix and leader_id is not None:
+            leader_base = base_by_src.get(leader_id)
+            if leader_base == final_base:
+                suffix_for_name = alias_suffix
 
-        while True:
-            try:
-                src_rec = next(src_iter)
-            except StopIteration:
-                try:
-                    next(alias_iter)
-                    raise ValueError(
-                        f"{alias_fasta} has more records than {source_fasta}; cannot align renaming."
-                    )
-                except StopIteration:
-                    break
+        leader_len_id = src_id if src_id in eq_map else leader_id
+        if leader_len_id is not None and leader_len_id in leader_len_map:
+            leader_len = leader_len_map[leader_len_id]
+        elif leader_len_id is not None and leader_len_id in source_len_map:
+            leader_len = str(source_len_map[leader_len_id])
+        else:
+            leader_len = str(variant_len)
 
-            try:
-                alias_rec = next(alias_iter)
-            except StopIteration as e:
-                raise ValueError(
-                    f"{alias_fasta} has fewer records than {source_fasta}; cannot align renaming."
-                ) from e
-
-            alias_core = split_alias_core(str(alias_rec.id))
-            leader_id, variant_suffix = match_family_from_alias(alias_core, family_ids_sorted)
-
-            seq = str(src_rec.seq)
-            variant_len = len(seq)
-
-            src_id = str(src_rec.id)
-            if src_id in eq_map:
-                # Respect direct mappings from equivalences.txt for any sequence that was
-                # independently counted/labeled, even if the alias FASTA grouped it under
-                # another leader. This fixes cases where a secondary-only variant got its own
-                # satellite name (e.g. DviSat55) and must not inherit the representative family
-                # suffix (e.g. DviSat53B).
-                final_base = eq_map[src_id]
-                leader_len = leader_len_map.get(src_id)
-                if leader_len is None:
-                    leader_len = str(source_len_map.get(src_id, variant_len))
-                # Keep the alias suffix only when this exact record is the alias leader/variant
-                # being renamed; otherwise do not borrow another family's A/B/C suffix.
-                suffix_for_name = variant_suffix if leader_id == src_id or leader_id is None else ""
-            elif leader_id is None:
-                # Very defensive fallback: keep the alias core if we cannot match it.
-                final_base = alias_core
-                leader_len = str(variant_len)
-                suffix_for_name = ""
-            else:
-                final_base = eq_map[leader_id]
-                leader_len = leader_len_map.get(leader_id)
-                if leader_len is None:
-                    leader_len = str(source_len_map.get(leader_id, variant_len))
-                suffix_for_name = variant_suffix
-
-            variant_name = f"{final_base}{suffix_for_name}-{variant_len}"
-            family_name = f"{final_base}-{leader_len}"
-            equivalence_pairs.append((str(src_rec.id), variant_name))
-            renamed_records.append((variant_name, family_name, seq))
+        variant_name = f"{final_base}{suffix_for_name}-{variant_len}"
+        family_name = f"{final_base}-{leader_len}"
+        equivalence_pairs.append((src_id, variant_name))
+        renamed_records.append((variant_name, family_name, seq))
 
     renamed_records.sort(key=lambda x: x[0])
     equivalence_pairs.sort(key=lambda x: x[1])
