@@ -154,6 +154,7 @@ def write_final_renamed_fasta(
         return
 
     family_ids_sorted = sorted(eq_map.keys(), key=len, reverse=True)
+    equivalence_pairs: List[Tuple[str, str]] = []
 
     with source_fasta.open("r", encoding="utf-8", errors="replace") as src_handle,          alias_fasta.open("r", encoding="utf-8", errors="replace") as alias_handle,          out_fasta.open("w", encoding="utf-8") as out_handle:
 
