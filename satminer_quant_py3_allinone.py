@@ -734,7 +734,7 @@ ggplot(data=lm, aes(x=Div, y=value, fill=variable))+
   geom_bar(stat="identity", position = position_stack(reverse = TRUE)) +
   scale_fill_manual(name="satDNA Families", values = palette1)+
   labs(x="Kimura Substitution Level (%)", y="Genome Proportion") +
-  guides(fill=guide_legend(ncol=3, byrow=TRUE)) +
+  guides(fill=guide_legend(ncol=3, byrow=FALSE)) +
   coord_cartesian(ylim=c(0,{big_row})) +
   theme_bw() +
   theme(
@@ -750,6 +750,17 @@ dev.off()
             run(["Rscript", str(r_path)])
         except Exception as e:
             print(f"WARNING: Could not run Rscript for {library}: {e}")
+
+    # merged .abdiv summaries for requested subtractive pairs
+    if rep_land != "NO":
+        for rl in rep_land.split(","):
+            rl = rl.strip()
+            if not rl:
+                continue
+            pairs = rl.split("-")
+            if len(pairs) != 2:
+                continue
+            merge_abdiv_pair(pairs[0], pairs[1])
 
     # subtractive repeat landscape
     if rep_land != "NO":
@@ -793,7 +804,7 @@ ggplot() +
   geom_bar(data=s1, aes(x=Div, y=value, fill=variable), stat="identity", position=position_stack(reverse = TRUE)) +
   scale_fill_manual(name="satDNA Families", values=palette1) +
   labs(x="Kimura Substitution Level (%)", y="Genome Proportion") +
-  guides(fill=guide_legend(ncol=3, byrow=TRUE)) +
+  guides(fill=guide_legend(ncol=3, byrow=FALSE)) +
   theme_bw() +
   theme(
     legend.position="right",
@@ -810,6 +821,41 @@ dev.off()
                 print(f"WARNING: Could not run Rscript for {rl}: {e}")
 
 
+
+
+def merge_abdiv_pair(lib_a: str, lib_b: str) -> None:
+    """Merge two .abdiv files side by side into <lib_a>-<lib_b>.abdiv.txt."""
+    def read_abdiv(path: Path):
+        rows = []
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                rows.append((parts[0], parts[1], parts[2]))
+        return rows
+
+    rows_a = read_abdiv(Path(f"{lib_a}.abdiv"))
+    rows_b = read_abdiv(Path(f"{lib_b}.abdiv"))
+
+    dict_a = {name: (ab, div) for name, ab, div in rows_a}
+    dict_b = {name: (ab, div) for name, ab, div in rows_b}
+
+    ordered_names = [name for name, _, _ in rows_a]
+    for name, _, _ in rows_b:
+        if name not in dict_a:
+            ordered_names.append(name)
+
+    out_path = Path(f"{lib_a}-{lib_b}.abdiv.txt")
+    with out_path.open("w", encoding="utf-8") as out:
+        out.write(f"Satellite\t{lib_a}_abundance\t{lib_a}_divergence\t{lib_b}_abundance\t{lib_b}_divergence\n")
+        for name in ordered_names:
+            a_ab, a_div = dict_a.get(name, ("0", "NA"))
+            b_ab, b_div = dict_b.get(name, ("0", "NA"))
+            out.write(f"{name}\t{a_ab}\t{a_div}\t{b_ab}\t{b_div}\n")
 
 def write_prefixed_copy(path: Path, prefix: str) -> None:
     """Write a copy of `path` with an extra first row whose first cell is `prefix`.
