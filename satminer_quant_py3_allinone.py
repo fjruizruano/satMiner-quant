@@ -91,6 +91,147 @@ def fasta_id_to_length(fasta_path: Path) -> Dict[str, int]:
     return lengths
 
 
+def load_table_lengths(table_path: Path) -> Dict[str, str]:
+    """Read table.txt-like files as {record_id: monomer_length_as_string}."""
+    lengths: Dict[str, str] = {}
+    if not table_path.exists():
+        return lengths
+    with table_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2 and parts[0]:
+                lengths[parts[0]] = parts[1]
+    return lengths
+
+
+def split_alias_core(alias_id: str) -> str:
+    """
+    Remove the trailing '-<digits>' length suffix from an intermediate alias id.
+    Example: 'DvittaR2CL250b_A1B-105' -> 'DvittaR2CL250b_A1B'
+    """
+    if "-" not in alias_id:
+        return alias_id
+    left, right = alias_id.rsplit("-", 1)
+    return left if right.isdigit() else alias_id
+
+
+def match_family_from_alias(alias_core: str, family_ids_sorted: List[str]) -> Tuple[str | None, str]:
+    """
+    Match an intermediate alias such as 'LeaderA' or 'LeaderB' back to its family leader id.
+    Returns (leader_id, variant_suffix_letters).
+    """
+    for fam_id in family_ids_sorted:
+        if alias_core == fam_id:
+            return fam_id, ""
+        if alias_core.startswith(fam_id):
+            suffix = alias_core[len(fam_id):]
+            if suffix.isalpha():
+                return fam_id, suffix
+    return None, ""
+
+
+def write_final_renamed_fasta(
+    source_fasta: Path,
+    alias_fasta: Path,
+    out_fasta: Path,
+    eq_map: Dict[str, str],
+    leader_len_map: Dict[str, str],
+    source_len_map: Dict[str, int],
+) -> None:
+    """
+    Build the final renamed FASTA from the original source FASTA and the intermediate .abc FASTA.
+
+    Output header format:
+      >DviSat01A-100#Satellite/DviSat01-100
+      >DviSat01B-105#Satellite/DviSat01-100
+    """
+    if not source_fasta.exists():
+        print(f"WARNING: source FASTA not found: {source_fasta}")
+        return
+    if not alias_fasta.exists():
+        print(f"WARNING: intermediate alias FASTA not found: {alias_fasta}")
+        return
+
+    family_ids_sorted = sorted(eq_map.keys(), key=len, reverse=True)
+
+    with source_fasta.open("r", encoding="utf-8", errors="replace") as src_handle,          alias_fasta.open("r", encoding="utf-8", errors="replace") as alias_handle,          out_fasta.open("w", encoding="utf-8") as out_handle:
+
+        src_iter = SeqIO.parse(src_handle, "fasta")
+        alias_iter = SeqIO.parse(alias_handle, "fasta")
+
+        while True:
+            try:
+                src_rec = next(src_iter)
+            except StopIteration:
+                try:
+                    next(alias_iter)
+                    raise ValueError(
+                        f"{alias_fasta} has more records than {source_fasta}; cannot align renaming."
+                    )
+                except StopIteration:
+                    break
+
+            try:
+                alias_rec = next(alias_iter)
+            except StopIteration as e:
+                raise ValueError(
+                    f"{alias_fasta} has fewer records than {source_fasta}; cannot align renaming."
+                ) from e
+
+            alias_core = split_alias_core(str(alias_rec.id))
+            leader_id, variant_suffix = match_family_from_alias(alias_core, family_ids_sorted)
+
+            seq = str(src_rec.seq)
+            variant_len = len(seq)
+
+            if leader_id is None:
+                # Very defensive fallback: keep the alias core if we cannot match it.
+                final_base = alias_core
+                leader_len = str(variant_len)
+            else:
+                final_base = eq_map[leader_id]
+                leader_len = leader_len_map.get(leader_id)
+                if leader_len is None:
+                    leader_len = str(source_len_map.get(leader_id, variant_len))
+
+            variant_name = f"{final_base}{variant_suffix}-{variant_len}"
+            family_name = f"{final_base}-{leader_len}"
+            out_handle.write(f">{variant_name}#Satellite/{family_name}\n{seq}\n")
+
+
+def rename_fasta_and_dim_outputs(fasta_monomers: Path) -> None:
+    """
+    Create the final renamed FASTA outputs:
+      - <fasta_monomers>.fam
+      - <fasta_monomers>.dim.fam
+
+    using the final equivalence names plus the per-variant letters from the intermediate .abc files.
+    """
+    eq_map = parse_patterns(Path("equivalences.txt"))
+    if not eq_map:
+        print("WARNING: equivalences.txt is empty or missing; final FASTA renaming skipped.")
+        return
+
+    leader_len_map = load_table_lengths(Path("table.txt"))
+    source_len_map = fasta_id_to_length(fasta_monomers)
+
+    abc_fasta = fasta_monomers.with_name(fasta_monomers.name + ".abc")
+    final_fasta = fasta_monomers.with_name(fasta_monomers.name + ".fam")
+    write_final_renamed_fasta(
+        fasta_monomers, abc_fasta, final_fasta, eq_map, leader_len_map, source_len_map
+    )
+
+    dim_fasta = fasta_monomers.with_name(fasta_monomers.name + ".dim")
+    dim_abc_fasta = fasta_monomers.with_name(fasta_monomers.name + ".dim.abc")
+    final_dim_fasta = fasta_monomers.with_name(fasta_monomers.name + ".dim.fam")
+    if dim_fasta.exists():
+        write_final_renamed_fasta(
+            dim_fasta, dim_abc_fasta, final_dim_fasta, eq_map, leader_len_map, source_len_map
+        )
+    else:
+        print(f"WARNING: expected {dim_fasta} to exist for final .dim.fam output, but it was not found.")
+
+
 
 def replace_patterns(input_file: Path, pattern_file: Path, *, output_suffix: str = ".fam") -> Path:
     """Replicates replace_patterns.py behavior: naive .replace for each key across each line."""
@@ -719,19 +860,11 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
     # convert divsum to repeat landscape + plots
     divsum_to_rl(samples_file, fasta_monomers)
 
-    # apply equivalences to outputs
+    # apply equivalences to tabular outputs
     replace_patterns(Path("table.txt"), Path("equivalences.txt"), output_suffix=".fam")
-    replace_patterns(Path(str(fasta_monomers) + ".abc"), Path("equivalences.txt"), output_suffix=".fam")
-    replace_patterns(Path(str(fasta_monomers) + ".dim.abc"), Path("equivalences.txt"), output_suffix=".fam")
 
-    # Create separate spreadsheet-friendly copies with prefix in A1.
-    # Originals are kept unchanged.
-    write_prefixed_copy(Path("selection.txt"), sp_name)
-    write_prefixed_copy(Path("pattern.txt"), sp_name)
-    write_prefixed_copy(Path("table.txt"), sp_name)
-    write_prefixed_copy(Path("equivalences.txt"), sp_name)
-    write_prefixed_copy(Path("table.txt.fam"), sp_name)
-    write_prefixed_copy(Path("selection.txt.extract"), sp_name)
+    # build final renamed FASTA outputs with the final family names and per-variant lengths
+    rename_fasta_and_dim_outputs(fasta_monomers)
 
 
 
