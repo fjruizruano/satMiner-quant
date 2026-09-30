@@ -352,17 +352,107 @@ def divsum_to_rl(samples_file: Path) -> None:
             if len(info) >= 2:
                 table_dict[info[0]] = info[1]
 
+    # ------------------------------------------------------------
+    # Build a GLOBAL satellite list so ALL libraries (and subtractive
+    # landscapes) share the same satellite set and ordering.
+    #
+    # Ordering rule:
+    #   1) All satellites present in the reference divsum, ordered by
+    #      decreasing abundance in the reference (original behavior).
+    #   2) Satellites absent in the reference but present in any other
+    #      divsum, appended and ordered by their MAX abundance across
+    #      non-reference libraries.
+    #
+    # This satisfies the request to still *list* satellites missing in
+    # the reference (they will be 0 in ref outputs), while keeping a
+    # consistent order across libraries (required for rep_land
+    # subtraction).
+    # ------------------------------------------------------------
+
+    # Pre-parse all non-reference libraries so we can collect "extra" satellites.
+    parsed_libs: Dict[str, Dict[str, object]] = {}
+    # store already-parsed reference too (for reuse later)
+    parsed_libs[ref_library] = {
+        "nucs": nucs,
+        "divergence": divergence,
+        "matrix_abs_dict": {name: vals for name, vals in matrix_mut},
+        "family_abs": family_abs,
+    }
+
+    for library in lib_dict:
+        if library == ref_library:
+            continue
+        lib_divsum = lib_dict[library][0].replace(".divsum", ".align.fam.divsum")
+        nucs_lib = int(lib_dict[library][1])
+
+        data2 = read_lines(Path(lib_divsum))
+        s_matrix_div2 = data2.index("-----\t------\t------\t-----------\t-------\n")
+        s_matrix2 = data2.index("Coverage for each repeat class and divergence (Kimura)\n")
+
+        divergence2: Dict[str, str] = {}
+        elements_div2 = data2[s_matrix_div2 + 1 : s_matrix2 - 2]
+        for line in elements_div2:
+            info = line.split()
+            if len(info) >= 2:
+                divergence2[info[1]] = info[-1]
+
+        elements2 = data2[s_matrix2 + 1].split()
+        matrix_mut2 = [[element.split("/")[-1], []] for element in elements2[1:]]
+        n_el2 = len(matrix_mut2)
+
+        for line in data2[s_matrix2 + 2 : s_matrix2 + 45]:
+            info = line.split()[1:]
+            if len(info) < n_el2:
+                continue
+            for n in range(n_el2):
+                matrix_mut2[n][1].append(int(info[n]))
+            suma = sum(int(x) for x in info)
+            suma_rel = suma / nucs_lib
+            if suma_rel > big_row:
+                big_row = suma_rel
+
+        family_abs2 = {matrix_mut2[n][0]: sum(matrix_mut2[n][1]) for n in range(n_el2)}
+        parsed_libs[library] = {
+            "nucs": nucs_lib,
+            "divergence": divergence2,
+            "matrix_abs_dict": {name: vals for name, vals in matrix_mut2},
+            "family_abs": family_abs2,
+        }
+
+    # Reference-ordered list
+    ref_ordered = [fam_name for fam_name, _ in sort_abs]
+    ref_set = set(ref_ordered)
+
+    # Collect extras + score by max abs abundance across non-ref libraries
+    extra_score: Dict[str, int] = {}
+    for library, pdata in parsed_libs.items():
+        if library == ref_library:
+            continue
+        fam_abs_lib: Dict[str, int] = pdata["family_abs"]  # type: ignore[assignment]
+        for fam_name, abs_count in fam_abs_lib.items():
+            if fam_name in ref_set:
+                continue
+            prev = extra_score.get(fam_name, 0)
+            if abs_count > prev:
+                extra_score[fam_name] = abs_count
+
+    extras_ordered = [
+        fam for fam, _ in sorted(extra_score.items(), key=operator.itemgetter(1), reverse=True)
+    ]
+
+    all_fams_ordered = ref_ordered + extras_ordered
+
     defnames: List[Tuple[str, str]] = []
     eq_names: List[Tuple[str, str]] = []
-    sat_digits = len(str(len(sort_abs)))
+    sat_digits = len(str(len(all_fams_ordered)))
 
-    for n, (fam_name, _) in enumerate(sort_abs):
+    for n, fam_name in enumerate(all_fams_ordered):
         number_name = str(n + 1).zfill(sat_digits)
         monomer_len = table_dict.get(fam_name, "NA")
         defnames.append((fam_name, f"{sp_name}Sat{number_name}-{monomer_len}"))
         eq_names.append((fam_name, f"{sp_name}Sat{number_name}"))
 
-    # write equivalences.txt
+    # write equivalences.txt (now includes also satellites absent in ref)
     with Path("equivalences.txt").open("w", encoding="utf-8") as out:
         for old, new in eq_names:
             out.write(f"{old}\t{new}\n")
@@ -379,10 +469,10 @@ def divsum_to_rl(samples_file: Path) -> None:
             out.write(f"{name}\t{rel}\t{div}\n")
 
     # matrix to dict + rel
-    matrix_abs_dict = {name: vals for name, vals in matrix_mut}
+    matrix_abs_dict = parsed_libs[ref_library]["matrix_abs_dict"]  # type: ignore[assignment]
     matrix_rel_list = []
     for fam_name, defname in defnames:
-        lista = matrix_abs_dict[fam_name]
+        lista = matrix_abs_dict.get(fam_name, [0] * n_div)  # type: ignore[attr-defined]
         lista_rel = [x / nucs for x in lista]
         matrix_rel_list.append((defname, lista_rel))
 
@@ -397,54 +487,28 @@ def divsum_to_rl(samples_file: Path) -> None:
             line = [str(a)] + [str(matrix_rel_list[b][1][a]) for b in range(len(matrix_rel_list))]
             out.write("\t".join(line) + "\n")
 
-    # other libraries
+    # other libraries (now use the GLOBAL satellite list)
     if len(lib_dict) > 1:
         for library in lib_dict:
             if library == ref_library:
                 continue
 
-            lib_divsum = lib_dict[library][0].replace(".divsum", ".align.fam.divsum")
-            nucs_lib = int(lib_dict[library][1])
-
-            data = read_lines(Path(lib_divsum))
-            s_matrix_div = data.index("-----\t------\t------\t-----------\t-------\n")
-            s_matrix = data.index("Coverage for each repeat class and divergence (Kimura)\n")
-
-            divergence = {}
-            elements_div = data[s_matrix_div + 1 : s_matrix - 2]
-            for line in elements_div:
-                info = line.split()
-                if len(info) >= 2:
-                    divergence[info[1]] = info[-1]
-
-            elements = data[s_matrix + 1].split()
-            matrix_mut2 = [[element.split("/")[-1], []] for element in elements[1:]]
-            n_el2 = len(matrix_mut2)
-
-            for line in data[s_matrix + 2 : s_matrix + 45]:
-                info = line.split()[1:]
-                if len(info) < n_el2:
-                    continue
-                for n in range(n_el2):
-                    matrix_mut2[n][1].append(int(info[n]))
-                suma = sum(int(x) for x in info)
-                suma_rel = suma / nucs_lib
-                if suma_rel > big_row:
-                    big_row = suma_rel
-
-            family_abs2 = {matrix_mut2[n][0]: sum(matrix_mut2[n][1]) for n in range(n_el2)}
+            pdata = parsed_libs[library]
+            nucs_lib = int(pdata["nucs"])  # type: ignore[arg-type]
+            divergence2 = pdata["divergence"]  # type: ignore[assignment]
+            family_abs2 = pdata["family_abs"]  # type: ignore[assignment]
+            matrix_abs_dict2 = pdata["matrix_abs_dict"]  # type: ignore[assignment]
 
             family_rel_def2 = []
             for fam_name, defname in defnames:
                 number = family_abs2.get(fam_name, 0)
                 rel_number = round(number / nucs_lib, 100)
-                family_rel_def2.append((defname, rel_number, divergence.get(fam_name, "NA")))
+                family_rel_def2.append((defname, rel_number, divergence2.get(fam_name, "NA")))
 
             with Path(f"{library}.abdiv").open("w", encoding="utf-8") as out:
                 for name, rel, div in family_rel_def2:
                     out.write(f"{name}\t{rel}\t{div}\n")
 
-            matrix_abs_dict2 = {name: vals for name, vals in matrix_mut2}
             matrix_rel_list2 = []
             for fam_name, defname in defnames:
                 lista = matrix_abs_dict2.get(fam_name, [0] * n_div)
@@ -470,7 +534,7 @@ library(grid)
 library(grid)
 lmig <- read.table("{library}_rl.txt",header=T)
 lm <- melt(lmig, id.vars=0:1)
-colourCount = {len(matrix_rel_list)}
+colourCount = {len(defnames)}
 ref <- colorRampPalette(brewer.pal(12, "Paired"))(colourCount)
 palette1 <- rev(ref)
 pdf("{library}_rl.pdf", width=11, height=7, onefile=TRUE)
@@ -528,7 +592,7 @@ subs <- read.table("{rl}_rl.txt",header=T)
 s <- melt(subs, id.vars=0:1)
 s1 <- subset(s,s$value>=0)
 s2 <- subset(s,s$value<0)
-colourCount = {len(matrix_rel_list)}
+colourCount = {len(defnames)}
 ref <- colorRampPalette(brewer.pal(12, "Paired"))(colourCount)
 palette1 <- rev(ref)
 pdf("{rl}_rl.pdf", width=11, height=7, onefile=TRUE)
