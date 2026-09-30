@@ -477,6 +477,22 @@ def rename_fasta_and_dim_outputs(fasta_monomers: Path, samples_file: Path) -> No
     else:
         print(f"WARNING: expected {dim_fasta} to exist for final .dim.fam output, but it was not found.")
 
+
+
+def suffix_from_index(idx: int) -> str:
+    """Return Excel-like variant suffixes: 0->A, 1->B, ..., 25->Z, 26->AA, ..."""
+    if idx < 0:
+        raise ValueError("idx must be >= 0")
+    out = []
+    n = idx
+    while True:
+        n, rem = divmod(n, 26)
+        out.append(chr(ord('A') + rem))
+        if n == 0:
+            break
+        n -= 1
+    return ''.join(reversed(out))
+
 def replace_patterns(input_file: Path, pattern_file: Path, *, output_suffix: str = ".fam") -> Path:
     """Replicates replace_patterns.py behavior: naive .replace for each key across each line."""
     patterns = parse_patterns(pattern_file)
