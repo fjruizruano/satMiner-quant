@@ -239,6 +239,38 @@ def rebuild_pattern_from_original_abundances(abund_path: Path, fasta_monomers: P
             at_perc = float(at / length) if length else 0.0
             out.write(f"{rid}\t{length}\t{at_perc}\t{var_number.get(rid, 1)}\n")
 
+def parse_divsum_file(divsum_path: Path, nucs: int) -> dict[str, object]:
+    """Parse one RepeatMasker .divsum file into divergence, absolute counts, and relative abundances."""
+    data = read_lines(divsum_path)
+    s_matrix_div = data.index("-----\t------\t------\t-----------\t-------\n")
+    s_matrix = data.index("Coverage for each repeat class and divergence (Kimura)\n")
+
+    divergence: Dict[str, str] = {}
+    for line in data[s_matrix_div + 1 : s_matrix - 2]:
+        info = line.split()
+        if len(info) >= 2:
+            divergence[info[1]] = info[-1]
+
+    elements = data[s_matrix + 1].split()
+    matrix_mut = [[element.split("/")[-1], []] for element in elements[1:]]
+    n_el = len(matrix_mut)
+    for line in data[s_matrix + 2 : s_matrix + 45]:
+        info = line.split()[1:]
+        if len(info) < n_el:
+            continue
+        for n in range(n_el):
+            matrix_mut[n][1].append(int(info[n]))
+
+    family_abs = {matrix_mut[n][0]: sum(matrix_mut[n][1]) for n in range(n_el)}
+    family_rel = {k: (v / nucs) for k, v in family_abs.items()}
+    return {
+        "nucs": nucs,
+        "divergence": divergence,
+        "family_abs": family_abs,
+        "family_rel": family_rel,
+    }
+
+
 def parse_original_divsum_counts(samples_file: Path) -> tuple[str, list[str], dict[str, dict[str, object]]]:
     """Parse the ORIGINAL .divsum files (not .align.fam.divsum) for all libraries."""
     samples = read_lines(samples_file)
@@ -257,43 +289,9 @@ def parse_original_divsum_counts(samples_file: Path) -> tuple[str, list[str], di
     for library, vals in lib_dict.items():
         divsum_path = Path(vals[0])
         nucs = int(vals[1])
-        data = read_lines(divsum_path)
-        s_matrix_div = data.index("-----\t------\t------\t-----------\t-------\n")
-        s_matrix = data.index("Coverage for each repeat class and divergence (Kimura)\n")
-
-        divergence: Dict[str, str] = {}
-        for line in data[s_matrix_div + 1 : s_matrix - 2]:
-            info = line.split()
-            if len(info) >= 2:
-                divergence[info[1]] = info[-1]
-
-        elements = data[s_matrix + 1].split()
-        matrix_mut = [[element.split("/")[-1], []] for element in elements[1:]]
-        n_el = len(matrix_mut)
-        for line in data[s_matrix + 2 : s_matrix + 45]:
-            info = line.split()[1:]
-            if len(info) < n_el:
-                continue
-            for n in range(n_el):
-                matrix_mut[n][1].append(int(info[n]))
-
-        family_abs = {matrix_mut[n][0]: sum(matrix_mut[n][1]) for n in range(n_el)}
-        family_rel = {k: (v / nucs) for k, v in family_abs.items()}
-        parsed[library] = {
-            "nucs": nucs,
-            "divergence": divergence,
-            "family_abs": family_abs,
-            "family_rel": family_rel,
-        }
+        parsed[library] = parse_divsum_file(divsum_path, nucs)
 
     return ref_library, lib_order, parsed
-
-
-def suffix_from_index(idx: int) -> str:
-    if idx < 26:
-        return chr(ord('A') + idx)
-    return f"_{idx+1}"
-
 
 def load_pattern_leaders(pattern_file: Path, fasta_ids: Iterable[str]) -> Dict[str, str]:
     """Return {original_id: cluster_leader_id} using pattern.txt member->leader mappings."""
@@ -334,16 +332,12 @@ def write_final_renamed_fasta(
     secondary_divergence: Dict[str, str],
     equivalence_out: Path | None = None,
     abundance_out: Path | None = None,
+    abundance_abs_out: Path | None = None,
     ref_library: str | None = None,
     secondary_library: str | None = None,
 ) -> None:
     """
     Build final renamed FASTA using all original FASTA variants plus abundances from the ORIGINAL divsums.
-
-    Key change:
-      - cluster membership comes from pattern.txt (member -> leader), not from the .abc FASTA.
-        This keeps variants like F1V2... and F1V1... in the same original cluster even when one
-        later receives its own satellite base name.
     """
     if not source_fasta.exists():
         print(f"WARNING: source FASTA not found: {source_fasta}")
@@ -352,7 +346,6 @@ def write_final_renamed_fasta(
     source_records = list(SeqIO.parse(str(source_fasta), "fasta"))
     source_ids = [str(rec.id) for rec in source_records]
 
-    # Resolve final base name for every original FASTA id.
     base_by_src: Dict[str, str] = {}
     for src_id in source_ids:
         leader_id = leader_by_src.get(src_id, src_id)
@@ -363,12 +356,10 @@ def write_final_renamed_fasta(
         else:
             base_by_src[src_id] = src_id
 
-    # Group all original sequences by their original cluster leader.
     members_by_leader: Dict[str, List[str]] = {}
     for src_id in source_ids:
         members_by_leader.setdefault(leader_by_src.get(src_id, src_id), []).append(src_id)
 
-    # Assign suffixes within the leader's final base using abundance ranking.
     suffix_by_src: Dict[str, str] = {}
     for leader_id, members in members_by_leader.items():
         leader_base = eq_map.get(leader_id, base_by_src.get(leader_id, leader_id))
@@ -389,7 +380,6 @@ def write_final_renamed_fasta(
         if len(members) == 1:
             suffix_by_src[members[0]] = ""
         elif len(ordered_keep) == 1:
-            # original cluster had multiple members, but only one stayed under the leader base
             suffix_by_src[ordered_keep[0]] = "A"
         else:
             for idx, src_id in enumerate(ordered_keep):
@@ -402,6 +392,7 @@ def write_final_renamed_fasta(
     equivalence_pairs: List[Tuple[str, str]] = []
     renamed_records: List[Tuple[str, str, str]] = []
     abundance_rows: List[Tuple[str, str, float, str, float, str]] = []
+    abundance_abs_rows: List[Tuple[str, str, int, str, int, str]] = []
 
     for src_rec in source_records:
         src_id = str(src_rec.id)
@@ -423,18 +414,13 @@ def write_final_renamed_fasta(
         family_name = f"{final_base}-{leader_len}"
         equivalence_pairs.append((src_id, variant_name))
         renamed_records.append((variant_name, family_name, seq))
-        abundance_rows.append((
-            src_id,
-            variant_name,
-            float(ref_rel.get(src_id, 0.0)),
-            str(ref_divergence.get(src_id, 'NA')),
-            float(secondary_rel.get(src_id, 0.0)),
-            str(secondary_divergence.get(src_id, 'NA')),
-        ))
+        abundance_rows.append((src_id, variant_name, float(ref_rel.get(src_id, 0.0)), str(ref_divergence.get(src_id, 'NA')), float(secondary_rel.get(src_id, 0.0)), str(secondary_divergence.get(src_id, 'NA'))))
+        abundance_abs_rows.append((src_id, variant_name, int(ref_counts.get(src_id, 0)), str(ref_divergence.get(src_id, 'NA')), int(secondary_counts.get(src_id, 0)), str(secondary_divergence.get(src_id, 'NA'))))
 
     renamed_records.sort(key=lambda x: x[0])
     equivalence_pairs.sort(key=lambda x: x[1])
     abundance_rows.sort(key=lambda x: x[1])
+    abundance_abs_rows.sort(key=lambda x: x[1])
 
     with out_fasta.open("w", encoding="utf-8") as out_handle:
         for variant_name, family_name, seq in renamed_records:
@@ -445,23 +431,22 @@ def write_final_renamed_fasta(
             for old_id, new_id in equivalence_pairs:
                 out_eq.write(f"{old_id}\t{new_id}\n")
 
+    ref_name = ref_library or "primary"
+    sec_name = secondary_library or "secondary"
     if abundance_out is not None:
-        ref_name = ref_library or "primary"
-        sec_name = secondary_library or "secondary"
         with abundance_out.open("w", encoding="utf-8") as out_ab:
-            out_ab.write(
-                f"OriginalID\tFinalID\t{ref_name}_abundance\t{ref_name}_divergence\t{sec_name}_abundance\t{sec_name}_divergence\n"
-            )
+            out_ab.write(f"OriginalID\tFinalID\t{ref_name}_abundance\t{ref_name}_divergence\t{sec_name}_abundance\t{sec_name}_divergence\n")
             for old_id, final_id, ref_ab, ref_div, sec_ab, sec_div in abundance_rows:
                 out_ab.write(f"{old_id}\t{final_id}\t{ref_ab}\t{ref_div}\t{sec_ab}\t{sec_div}\n")
 
-
+    if abundance_abs_out is not None:
+        with abundance_abs_out.open("w", encoding="utf-8") as out_ab_abs:
+            out_ab_abs.write(f"OriginalID\tFinalID\t{ref_name}_abundance\t{ref_name}_divergence\t{sec_name}_abundance\t{sec_name}_divergence\n")
+            for old_id, final_id, ref_ab, ref_div, sec_ab, sec_div in abundance_abs_rows:
+                out_ab_abs.write(f"{old_id}\t{final_id}\t{ref_ab}\t{ref_div}\t{sec_ab}\t{sec_div}\n")
 
 def rename_fasta_and_dim_outputs(fasta_monomers: Path, samples_file: Path) -> None:
-    """
-    Create the final renamed FASTA outputs and a per-sequence abundance table using the ORIGINAL divsums.
-    Membership is resolved from pattern.txt so the naming of A/B/C variants follows the original cluster.
-    """
+    """Create the final renamed FASTA outputs and per-sequence abundance tables using the ORIGINAL divsums."""
     eq_map = parse_patterns(Path("equivalences.txt"))
     if not eq_map:
         print("WARNING: equivalences.txt is empty or missing; final FASTA renaming skipped.")
@@ -483,46 +468,12 @@ def rename_fasta_and_dim_outputs(fasta_monomers: Path, samples_file: Path) -> No
     leader_by_src = load_pattern_leaders(Path("pattern.txt"), fasta_ids)
 
     final_fasta = fasta_monomers.with_name(fasta_monomers.name + ".fam")
-    write_final_renamed_fasta(
-        fasta_monomers,
-        final_fasta,
-        eq_map,
-        leader_len_map,
-        source_len_map,
-        leader_by_src,
-        ref_counts,
-        secondary_counts,
-        ref_rel,
-        secondary_rel,
-        ref_divergence,
-        secondary_divergence,
-        Path("equivalences.txt.fam"),
-        Path("final_variant_abundances.txt"),
-        ref_library,
-        secondary_library,
-    )
+    write_final_renamed_fasta(fasta_monomers, final_fasta, eq_map, leader_len_map, source_len_map, leader_by_src, ref_counts, secondary_counts, ref_rel, secondary_rel, ref_divergence, secondary_divergence, Path("equivalences.txt.fam"), Path("final_variant_abundances.txt"), Path("final_variant_abundances_absolute.txt"), ref_library, secondary_library)
 
     dim_fasta = fasta_monomers.with_name(fasta_monomers.name + ".dim")
     final_dim_fasta = fasta_monomers.with_name(fasta_monomers.name + ".dim.fam")
     if dim_fasta.exists():
-        write_final_renamed_fasta(
-            dim_fasta,
-            final_dim_fasta,
-            eq_map,
-            leader_len_map,
-            source_len_map,
-            leader_by_src,
-            ref_counts,
-            secondary_counts,
-            ref_rel,
-            secondary_rel,
-            ref_divergence,
-            secondary_divergence,
-            None,
-            None,
-            ref_library,
-            secondary_library,
-        )
+        write_final_renamed_fasta(dim_fasta, final_dim_fasta, eq_map, leader_len_map, source_len_map, leader_by_src, ref_counts, secondary_counts, ref_rel, secondary_rel, ref_divergence, secondary_divergence, None, None, None, ref_library, secondary_library)
     else:
         print(f"WARNING: expected {dim_fasta} to exist for final .dim.fam output, but it was not found.")
 
@@ -1126,50 +1077,61 @@ def write_original_variant_abundances(samples_file: Path, fasta_monomers: Path, 
             out.write(f"{rid}	{length}	{ra}	{rd}	{sa}	{sd}\n")
 
 
-def write_grouped_satellite_abundances(samples_file: Path, out_path: Path = Path("grouped_satellite_abundances.txt")) -> None:
-    """Write one row per grouped satellite after the .align.fam.divsum step, using final names from .abdiv outputs."""
+def write_grouped_satellite_abundances(samples_file: Path, out_path: Path = Path("grouped_satellite_abundances.txt"), out_abs_path: Path = Path("grouped_satellite_abundances_absolute.txt")) -> None:
+    """Write one row per grouped satellite after the .align.fam.divsum step, in both relative and absolute counts."""
     samples = read_lines(samples_file)
-    header = samples[0].rstrip("\n").split("	")
+    header = samples[0].rstrip("\n").split("\t")
     ref_library = header[1]
-    libs = []
+
+    lib_meta: Dict[str, List[str]] = {}
+    libs: List[str] = []
     for lib in samples[1:]:
-        parts = lib.rstrip("\n").split("	")
-        if len(parts) >= 2:
+        parts = lib.rstrip("\n").split("\t")
+        if len(parts) >= 3:
             libs.append(parts[0])
+            lib_meta[parts[0]] = parts[1:]
     secondary_library = next((lib for lib in libs if lib != ref_library), None)
     if secondary_library is None:
         print("WARNING: grouped_satellite_abundances.txt not written because no secondary library was found.")
         return
 
-    def read_abdiv(path: Path):
-        rows = []
-        if not path.exists():
-            return rows
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.rstrip("\n")
-                if not line:
-                    continue
-                parts = line.split("	")
-                if len(parts) >= 3:
-                    rows.append((parts[0], parts[1], parts[2]))
-        return rows
+    ref_nucs = int(lib_meta[ref_library][1])
+    sec_nucs = int(lib_meta[secondary_library][1])
+    ref_divsum = Path(lib_meta[ref_library][0].replace('.divsum', '.align.fam.divsum'))
+    sec_divsum = Path(lib_meta[secondary_library][0].replace('.divsum', '.align.fam.divsum'))
 
-    rows_a = read_abdiv(Path(f"{ref_library}.abdiv"))
-    rows_b = read_abdiv(Path(f"{secondary_library}.abdiv"))
-    dict_a = {name: (ab, div) for name, ab, div in rows_a}
-    dict_b = {name: (ab, div) for name, ab, div in rows_b}
-    ordered = [name for name, _, _ in rows_a]
-    for name, _, _ in rows_b:
-        if name not in dict_a:
-            ordered.append(name)
+    ref_data = parse_divsum_file(ref_divsum, ref_nucs)
+    sec_data = parse_divsum_file(sec_divsum, sec_nucs)
+    ref_rel = ref_data["family_rel"]  # type: ignore[index]
+    ref_abs = ref_data["family_abs"]  # type: ignore[index]
+    ref_div = ref_data["divergence"]  # type: ignore[index]
+    sec_rel = sec_data["family_rel"]  # type: ignore[index]
+    sec_abs = sec_data["family_abs"]  # type: ignore[index]
+    sec_div = sec_data["divergence"]  # type: ignore[index]
+
+    eq_reverse: Dict[str, str] = {}
+    eq_path = Path("equivalences.txt")
+    if eq_path.exists():
+        for line in read_lines(eq_path):
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2:
+                eq_reverse[parts[1]] = parts[0]
+
+    ordered = sorted(set(list(ref_rel.keys()) + list(sec_rel.keys())))
+
+    def original_id_for(final_name: str) -> str:
+        base = final_name.split('-')[0]
+        return eq_reverse.get(base, "NA")
 
     with out_path.open("w", encoding="utf-8") as out:
-        out.write(f"FinalSatellite	{ref_library}_abundance	{ref_library}_divergence	{secondary_library}_abundance	{secondary_library}_divergence\n")
+        out.write(f"OriginalID\tFinalSatellite\t{ref_library}_abundance\t{ref_library}_divergence\t{secondary_library}_abundance\t{secondary_library}_divergence\n")
         for name in ordered:
-            a_ab, a_div = dict_a.get(name, ("0", "NA"))
-            b_ab, b_div = dict_b.get(name, ("0", "NA"))
-            out.write(f"{name}	{a_ab}	{a_div}	{b_ab}	{b_div}\n")
+            out.write(f"{original_id_for(name)}\t{name}\t{ref_rel.get(name, 0)}\t{ref_div.get(name, 'NA')}\t{sec_rel.get(name, 0)}\t{sec_div.get(name, 'NA')}\n")
+
+    with out_abs_path.open("w", encoding="utf-8") as out_abs:
+        out_abs.write(f"OriginalID\tFinalSatellite\t{ref_library}_abundance\t{ref_library}_divergence\t{secondary_library}_abundance\t{secondary_library}_divergence\n")
+        for name in ordered:
+            out_abs.write(f"{original_id_for(name)}\t{name}\t{ref_abs.get(name, 0)}\t{ref_div.get(name, 'NA')}\t{sec_abs.get(name, 0)}\t{sec_div.get(name, 'NA')}\n")
 
 def merge_abdiv_pair(lib_a: str, lib_b: str) -> None:
     """Merge two .abdiv files side by side into <lib_a>-<lib_b>.abdiv.txt."""
