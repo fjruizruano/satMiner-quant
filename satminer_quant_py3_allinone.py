@@ -466,16 +466,25 @@ def divsum_to_rl(samples_file: Path) -> None:
 library(plyr)
 library(reshape2)
 library(RColorBrewer)
+library(grid)
+library(grid)
 lmig <- read.table("{library}_rl.txt",header=T)
 lm <- melt(lmig, id.vars=0:1)
 colourCount = {len(matrix_rel_list)}
 ref <- colorRampPalette(brewer.pal(12, "Paired"))(colourCount)
 palette1 <- rev(ref)
-pdf("{library}_rl.pdf")
+pdf("{library}_rl.pdf", width=11, height=7, onefile=TRUE)
 ggplot(data=lm, aes(x=lm$Div, y=lm$value, fill=lm$variable))+
   geom_bar(stat="identity", position = position_stack(reverse = TRUE)) +
   scale_fill_manual(name="satDNA Families", values = palette1)+
   labs(x="Kimura Substitution Level (%)", y="Genome Proportion") +
+  guides(fill=guide_legend(ncol=3, byrow=TRUE)) +
+  theme(
+    legend.position="right",
+    legend.title=element_text(size=10),
+    legend.text=element_text(size=7),
+    legend.key.size=unit(0.35, "cm")
+  ) +
   ylim(0,{big_row}) +
   theme_bw()
 dev.off()
@@ -514,6 +523,7 @@ dev.off()
 library(plyr)
 library(reshape2)
 library(RColorBrewer)
+library(grid)
 subs <- read.table("{rl}_rl.txt",header=T)
 s <- melt(subs, id.vars=0:1)
 s1 <- subset(s,s$value>=0)
@@ -521,12 +531,19 @@ s2 <- subset(s,s$value<0)
 colourCount = {len(matrix_rel_list)}
 ref <- colorRampPalette(brewer.pal(12, "Paired"))(colourCount)
 palette1 <- rev(ref)
-pdf("{rl}_rl.pdf")
+pdf("{rl}_rl.pdf", width=11, height=7, onefile=TRUE)
 ggplot()+
   geom_bar(data=s2,aes(x=s2$Div, y=s2$value, fill=s2$variable),stat="identity",position=position_stack(reverse = TRUE))+
   scale_fill_manual(name="satDNA Families", values=palette1)+
   labs(x="Kimura Substitution Level (%)", y="Genome Proportion")+
   theme_bw() +
+  guides(fill=guide_legend(ncol=3, byrow=TRUE)) +
+  theme(
+    legend.position="right",
+    legend.title=element_text(size=10),
+    legend.text=element_text(size=7),
+    legend.key.size=unit(0.35, "cm")
+  ) +
   geom_bar(data=s1,aes(x=s1$Div, y=s1$value, fill=s1$variable),stat="identity",position=position_stack(reverse = TRUE))+
   scale_fill_manual(name="satDNA Families", values=palette1)+
   labs(x="Kimura Substitution Level (%)",y="Genome Proportion")+
@@ -540,6 +557,25 @@ dev.off()
                 print(f"WARNING: Could not run Rscript for {rl}: {e}")
 
 
+
+def write_prefixed_copy(path: Path, prefix: str) -> None:
+    """Write a copy of `path` with an extra first row whose first cell is `prefix`.
+
+    This is meant for downstream manual inspection/merging in spreadsheets without breaking
+    the original pipeline inputs/outputs.
+    Output filename: <original>.prefixed
+    """
+    if not path.exists():
+        return
+    lines = read_lines(path)
+    # Preserve original file exactly below the new header row
+    # Use tab on the header row if the file appears tabular; otherwise single cell.
+    header = prefix + ("\t" if (lines and ("\t" in lines[0])) else "")
+    out_path = path.with_name(path.name + ".prefixed")
+    with out_path.open("w", encoding="utf-8") as out:
+        out.write(header + "\n")
+        for l in lines:
+            out.write(l if l.endswith("\n") else l + "\n")
 # -------------------------
 # main pipeline (satminer_quant)
 # -------------------------
@@ -591,6 +627,15 @@ def satminer_quant(samples_file: Path, fasta_monomers: Path) -> None:
     replace_patterns(Path("table.txt"), Path("equivalences.txt"), output_suffix=".fam")
     replace_patterns(Path(str(fasta_monomers) + ".abc"), Path("equivalences.txt"), output_suffix=".fam")
     replace_patterns(Path(str(fasta_monomers) + ".dim.abc"), Path("equivalences.txt"), output_suffix=".fam")
+
+    # Optional: write spreadsheet-friendly copies with prefix in A1
+    write_prefixed_copy(Path("selection.txt"), sp_name)
+    write_prefixed_copy(Path("pattern.txt"), sp_name)
+    write_prefixed_copy(Path("table.txt"), sp_name)
+    write_prefixed_copy(Path("equivalences.txt"), sp_name)
+    write_prefixed_copy(Path("table.txt.fam"), sp_name)
+    write_prefixed_copy(Path("selection.txt.extract"), sp_name)
+
 
 
 def build_argparser() -> argparse.ArgumentParser:
