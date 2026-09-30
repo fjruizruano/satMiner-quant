@@ -187,17 +187,33 @@ def write_final_renamed_fasta(
             seq = str(src_rec.seq)
             variant_len = len(seq)
 
-            if leader_id is None:
+            src_id = str(src_rec.id)
+            if src_id in eq_map:
+                # Respect direct mappings from equivalences.txt for any sequence that was
+                # independently counted/labeled, even if the alias FASTA grouped it under
+                # another leader. This fixes cases where a secondary-only variant got its own
+                # satellite name (e.g. DviSat55) and must not inherit the representative family
+                # suffix (e.g. DviSat53B).
+                final_base = eq_map[src_id]
+                leader_len = leader_len_map.get(src_id)
+                if leader_len is None:
+                    leader_len = str(source_len_map.get(src_id, variant_len))
+                # Keep the alias suffix only when this exact record is the alias leader/variant
+                # being renamed; otherwise do not borrow another family's A/B/C suffix.
+                suffix_for_name = variant_suffix if leader_id == src_id or leader_id is None else ""
+            elif leader_id is None:
                 # Very defensive fallback: keep the alias core if we cannot match it.
                 final_base = alias_core
                 leader_len = str(variant_len)
+                suffix_for_name = ""
             else:
                 final_base = eq_map[leader_id]
                 leader_len = leader_len_map.get(leader_id)
                 if leader_len is None:
                     leader_len = str(source_len_map.get(leader_id, variant_len))
+                suffix_for_name = variant_suffix
 
-            variant_name = f"{final_base}{variant_suffix}-{variant_len}"
+            variant_name = f"{final_base}{suffix_for_name}-{variant_len}"
             family_name = f"{final_base}-{leader_len}"
             equivalence_pairs.append((str(src_rec.id), variant_name))
             renamed_records.append((variant_name, family_name, seq))
